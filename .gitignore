@@ -1,0 +1,23 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Generated code
+/src/generated/
+
+# Proto files (downloaded during build)
+/proto/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Config (may contain sensitive data)
+config.yaml
+*.local.yaml
+
+# macOS
+.DS_Store

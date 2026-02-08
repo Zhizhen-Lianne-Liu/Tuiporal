@@ -1,0 +1,37 @@
+[package]
+name = "tuiporal"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tuiporal Contributors"]
+description = "A Terminal User Interface for Temporal workflow orchestration"
+license = "Apache-2.0"
+
+[dependencies]
+# TUI
+ratatui = "0.30"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+
+# gRPC and protobuf
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+config = "0.14"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Utilities
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+tonic-build = "0.12"

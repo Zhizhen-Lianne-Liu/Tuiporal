@@ -110,6 +110,14 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw("      → Open child / view selected event"),
         ]),
         Line::from(vec![
+            Span::styled("  /", Style::default().fg(Color::Yellow)),
+            Span::raw("         → Search workflow/activity tree"),
+        ]),
+        Line::from(vec![
+            Span::styled("  f / c", Style::default().fg(Color::Yellow)),
+            Span::raw("      → Filter state / clear tree filters"),
+        ]),
+        Line::from(vec![
             Span::styled("  Tab", Style::default().fg(Color::Yellow)),
             Span::raw("        → Switch tree / event history"),
         ]),

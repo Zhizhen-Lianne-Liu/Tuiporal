@@ -4,6 +4,8 @@ use crate::generated::temporal::api::{
     history::v1::{history_event::Attributes, HistoryEvent},
     workflow::v1::{PendingActivityInfo, PendingChildExecutionInfo, WorkflowExecutionInfo},
 };
+use chrono::{DateTime, Utc};
+use prost_types::{Duration as ProtoDuration, Timestamp};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +73,116 @@ pub struct OutlineRow {
     pub status: NodeStatus,
     pub workflow: Option<WorkflowExecutionInfo>, // None for activities and not-yet-visible children
     pub is_activity: bool,
+    pub started_at: Option<Timestamp>,
+    pub ended_at: Option<Timestamp>,
+    pub reported_duration: Option<ProtoDuration>,
+}
+
+impl OutlineRow {
+    /// Runtime, not time spent queued. Unknown start/end times stay unknown.
+    pub fn runtime_millis(&self, now: DateTime<Utc>) -> Option<u64> {
+        if matches!(
+            self.status,
+            NodeStatus::Queued | NodeStatus::Paused | NodeStatus::Unknown
+        ) {
+            return None;
+        }
+        if !self.status.active() {
+            if let Some(duration) = &self.reported_duration {
+                let seconds = u64::try_from(duration.seconds).ok()?;
+                let nanos = u64::try_from(duration.nanos).ok()?;
+                return Some(
+                    seconds
+                        .saturating_mul(1000)
+                        .saturating_add(nanos / 1_000_000),
+                );
+            }
+        }
+        let start = self
+            .started_at
+            .as_ref()
+            .and_then(|t| DateTime::<Utc>::from_timestamp(t.seconds, t.nanos as u32))?;
+        let end = if self.status.active() {
+            now
+        } else {
+            let t = self.ended_at.as_ref()?;
+            DateTime::<Utc>::from_timestamp(t.seconds, t.nanos as u32)?
+        };
+        Some(end.signed_duration_since(start).num_milliseconds().max(0) as u64)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutlineFilter {
+    #[default]
+    All,
+    Active,
+    Failed,
+    Completed,
+}
+
+impl OutlineFilter {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Active,
+            Self::Active => Self::Failed,
+            Self::Failed => Self::Completed,
+            Self::Completed => Self::All,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Active => "Active",
+            Self::Failed => "Failed",
+            Self::Completed => "Done",
+        }
+    }
+    fn matches(self, status: NodeStatus) -> bool {
+        match self {
+            Self::All => true,
+            Self::Active => status.active(),
+            Self::Failed => matches!(
+                status,
+                NodeStatus::Failed | NodeStatus::TimedOut | NodeStatus::Terminated
+            ),
+            Self::Completed => status == NodeStatus::Completed,
+        }
+    }
+}
+
+/// Keep matching rows *and* their ancestors so a filtered result remains a tree.
+pub fn filter_outline(rows: &[OutlineRow], query: &str, filter: OutlineFilter) -> Vec<OutlineRow> {
+    let query = query.to_lowercase();
+    let mut keep = vec![false; rows.len()];
+    for (index, row) in rows.iter().enumerate() {
+        let matches_text = query.is_empty()
+            || row.label.to_lowercase().contains(&query)
+            || row.workflow_id.to_lowercase().contains(&query)
+            || row
+                .workflow
+                .as_ref()
+                .and_then(|w| w.execution.as_ref())
+                .is_some_and(|e| e.run_id.to_lowercase().contains(&query));
+        if !filter.matches(row.status) || !matches_text {
+            continue;
+        }
+        keep[index] = true;
+        let mut depth = row.depth;
+        for parent in (0..index).rev() {
+            if rows[parent].depth < depth {
+                keep[parent] = true;
+                depth = rows[parent].depth;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    rows.iter()
+        .zip(keep)
+        .filter_map(|(row, show)| show.then(|| row.clone()))
+        .collect()
 }
 
 fn execution_key(info: &WorkflowExecutionInfo) -> Option<(String, String)> {
@@ -120,12 +232,20 @@ fn visit(
         status: info.status.into(),
         workflow: Some(info.clone()),
         is_activity: false,
+        started_at: info
+            .execution_time
+            .clone()
+            .or_else(|| info.start_time.clone()),
+        ended_at: info.close_time.clone(),
+        reported_duration: info.execution_duration.clone(),
     });
 
     // Activity terminal events refer back to their original scheduled event, not the
     // most recent start. Keying by scheduled_event_id also handles retry attempts.
     let mut activity_status: HashMap<i64, NodeStatus> = HashMap::new();
+    let mut activity_times: HashMap<i64, (Option<Timestamp>, Option<Timestamp>)> = HashMap::new();
     let mut child_status: HashMap<i64, NodeStatus> = HashMap::new();
+    let mut child_times: HashMap<i64, (Option<Timestamp>, Option<Timestamp>)> = HashMap::new();
     for event in &snapshot.history {
         match &event.attributes {
             Some(Attributes::ActivityTaskScheduledEventAttributes(_)) => {
@@ -133,39 +253,55 @@ fn visit(
             }
             Some(Attributes::ActivityTaskStartedEventAttributes(a)) => {
                 activity_status.insert(a.scheduled_event_id, NodeStatus::Running);
+                activity_times.entry(a.scheduled_event_id).or_default().0 =
+                    event.event_time.clone();
             }
             Some(Attributes::ActivityTaskCompletedEventAttributes(a)) => {
                 activity_status.insert(a.scheduled_event_id, NodeStatus::Completed);
+                activity_times.entry(a.scheduled_event_id).or_default().1 =
+                    event.event_time.clone();
             }
             Some(Attributes::ActivityTaskFailedEventAttributes(a)) => {
                 activity_status.insert(a.scheduled_event_id, NodeStatus::Failed);
+                activity_times.entry(a.scheduled_event_id).or_default().1 =
+                    event.event_time.clone();
             }
             Some(Attributes::ActivityTaskTimedOutEventAttributes(a)) => {
                 activity_status.insert(a.scheduled_event_id, NodeStatus::TimedOut);
+                activity_times.entry(a.scheduled_event_id).or_default().1 =
+                    event.event_time.clone();
             }
             Some(Attributes::ActivityTaskCanceledEventAttributes(a)) => {
                 activity_status.insert(a.scheduled_event_id, NodeStatus::Canceled);
+                activity_times.entry(a.scheduled_event_id).or_default().1 =
+                    event.event_time.clone();
             }
             Some(Attributes::StartChildWorkflowExecutionInitiatedEventAttributes(_)) => {
                 child_status.insert(event.event_id, NodeStatus::Queued);
             }
             Some(Attributes::ChildWorkflowExecutionStartedEventAttributes(a)) => {
                 child_status.insert(a.initiated_event_id, NodeStatus::Running);
+                child_times.entry(a.initiated_event_id).or_default().0 = event.event_time.clone();
             }
             Some(Attributes::ChildWorkflowExecutionCompletedEventAttributes(a)) => {
                 child_status.insert(a.initiated_event_id, NodeStatus::Completed);
+                child_times.entry(a.initiated_event_id).or_default().1 = event.event_time.clone();
             }
             Some(Attributes::ChildWorkflowExecutionFailedEventAttributes(a)) => {
                 child_status.insert(a.initiated_event_id, NodeStatus::Failed);
+                child_times.entry(a.initiated_event_id).or_default().1 = event.event_time.clone();
             }
             Some(Attributes::ChildWorkflowExecutionCanceledEventAttributes(a)) => {
                 child_status.insert(a.initiated_event_id, NodeStatus::Canceled);
+                child_times.entry(a.initiated_event_id).or_default().1 = event.event_time.clone();
             }
             Some(Attributes::ChildWorkflowExecutionTimedOutEventAttributes(a)) => {
                 child_status.insert(a.initiated_event_id, NodeStatus::TimedOut);
+                child_times.entry(a.initiated_event_id).or_default().1 = event.event_time.clone();
             }
             Some(Attributes::ChildWorkflowExecutionTerminatedEventAttributes(a)) => {
                 child_status.insert(a.initiated_event_id, NodeStatus::Terminated);
+                child_times.entry(a.initiated_event_id).or_default().1 = event.event_time.clone();
             }
             _ => {}
         }
@@ -201,6 +337,18 @@ fn visit(
                     status,
                     workflow: None,
                     is_activity: true,
+                    started_at: pending_by_id
+                        .get(a.activity_id.as_str())
+                        .and_then(|pending| pending.last_started_time.clone())
+                        .or_else(|| {
+                            activity_times
+                                .get(&event.event_id)
+                                .and_then(|t| t.0.clone())
+                        }),
+                    ended_at: activity_times
+                        .get(&event.event_id)
+                        .and_then(|t| t.1.clone()),
+                    reported_duration: None,
                 });
             }
             Some(Attributes::StartChildWorkflowExecutionInitiatedEventAttributes(a)) => {
@@ -240,6 +388,9 @@ fn visit(
                         },
                         workflow: None,
                         is_activity: false,
+                        started_at: child_times.get(&event.event_id).and_then(|t| t.0.clone()),
+                        ended_at: child_times.get(&event.event_id).and_then(|t| t.1.clone()),
+                        reported_duration: None,
                     });
                 }
             }
@@ -354,6 +505,188 @@ mod tests {
         let rows = build_outline(&[snapshot], &root);
         assert_eq!(rows[1].label, "Shipping");
         assert_eq!(rows[1].status, NodeStatus::Running);
+    }
+
+    #[test]
+    fn runtime_uses_execution_and_activity_start_not_queue_time() {
+        let mut root = info(
+            "order",
+            "Checkout",
+            None,
+            WorkflowExecutionStatus::Completed,
+        );
+        root.start_time = Some(Timestamp {
+            seconds: 90,
+            nanos: 0,
+        });
+        root.execution_time = Some(Timestamp {
+            seconds: 100,
+            nanos: 0,
+        });
+        root.close_time = Some(Timestamp {
+            seconds: 130,
+            nanos: 0,
+        });
+        let ts = |seconds| Some(Timestamp { seconds, nanos: 0 });
+        let history = vec![
+            HistoryEvent {
+                event_id: 5,
+                event_time: ts(102),
+                attributes: Some(Attributes::ActivityTaskScheduledEventAttributes(
+                    ActivityTaskScheduledEventAttributes {
+                        activity_id: "a1".into(),
+                        activity_type: Some(ActivityType {
+                            name: "Charge".into(),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+            HistoryEvent {
+                event_id: 6,
+                event_time: ts(110),
+                attributes: Some(Attributes::ActivityTaskStartedEventAttributes(
+                    ActivityTaskStartedEventAttributes {
+                        scheduled_event_id: 5,
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+            HistoryEvent {
+                event_id: 7,
+                event_time: ts(114),
+                attributes: Some(Attributes::ActivityTaskCompletedEventAttributes(
+                    ActivityTaskCompletedEventAttributes {
+                        scheduled_event_id: 5,
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            },
+        ];
+        let rows = build_outline(
+            &[WorkflowSnapshot {
+                info: root.clone(),
+                history,
+                pending_activities: vec![],
+                pending_children: vec![],
+            }],
+            &root,
+        );
+        let now = DateTime::<Utc>::from_timestamp(200, 0).unwrap();
+        assert_eq!(rows[0].runtime_millis(now), Some(30_000));
+        assert_eq!(rows[1].runtime_millis(now), Some(4_000)); // not 12s since scheduled
+    }
+
+    #[test]
+    fn subsecond_runs_are_not_reported_as_zero_seconds() {
+        let row = OutlineRow {
+            depth: 1,
+            label: "FastActivity".into(),
+            workflow_id: "order".into(),
+            status: NodeStatus::Completed,
+            workflow: None,
+            is_activity: true,
+            started_at: Some(Timestamp {
+                seconds: 100,
+                nanos: 0,
+            }),
+            ended_at: Some(Timestamp {
+                seconds: 100,
+                nanos: 420_000_000,
+            }),
+            reported_duration: None,
+        };
+        let now = DateTime::<Utc>::from_timestamp(200, 0).unwrap();
+        assert_eq!(row.runtime_millis(now), Some(420));
+    }
+
+    #[test]
+    fn live_pending_activity_clock_and_filter_keep_ancestors() {
+        let mut root = info("order", "Checkout", None, WorkflowExecutionStatus::Running);
+        root.execution_time = Some(Timestamp {
+            seconds: 100,
+            nanos: 0,
+        });
+        let snapshot = WorkflowSnapshot {
+            info: root.clone(),
+            history: vec![HistoryEvent {
+                event_id: 5,
+                attributes: Some(Attributes::ActivityTaskScheduledEventAttributes(
+                    ActivityTaskScheduledEventAttributes {
+                        activity_id: "a1".into(),
+                        activity_type: Some(ActivityType {
+                            name: "WaitForWorker".into(),
+                        }),
+                        ..Default::default()
+                    },
+                )),
+                ..Default::default()
+            }],
+            pending_activities: vec![PendingActivityInfo {
+                activity_id: "a1".into(),
+                last_started_time: Some(Timestamp {
+                    seconds: 120,
+                    nanos: 0,
+                }),
+                state: PendingActivityState::Started as i32,
+                ..Default::default()
+            }],
+            pending_children: vec![],
+        };
+        let rows = build_outline(&[snapshot], &root);
+        let now = DateTime::<Utc>::from_timestamp(130, 0).unwrap();
+        assert_eq!(rows[0].runtime_millis(now), Some(30_000));
+        assert_eq!(rows[1].runtime_millis(now), Some(10_000));
+        let filtered = filter_outline(&rows, "waitforworker", OutlineFilter::Active);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Checkout", "WaitForWorker"]
+        );
+        assert_eq!(
+            filter_outline(&rows, "missing", OutlineFilter::All).len(),
+            0
+        );
+        assert_eq!(filter_outline(&rows, "", OutlineFilter::Failed).len(), 0);
+        assert_eq!(
+            OutlineFilter::All.next().next().next().next(),
+            OutlineFilter::All
+        );
+    }
+
+    #[test]
+    fn failed_filter_keeps_ancestors_without_unrelated_siblings() {
+        let row = |depth, label: &str, status| OutlineRow {
+            depth,
+            label: label.into(),
+            workflow_id: label.into(),
+            status,
+            workflow: None,
+            is_activity: false,
+            started_at: None,
+            ended_at: None,
+            reported_duration: None,
+        };
+        let rows = vec![
+            row(0, "Root", NodeStatus::Running),
+            row(1, "Payment", NodeStatus::Completed),
+            row(2, "Charge", NodeStatus::Failed),
+            row(1, "Shipping", NodeStatus::Completed),
+        ];
+        let filtered = filter_outline(&rows, "charge", OutlineFilter::Failed);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Root", "Payment", "Charge"]
+        );
+        assert_eq!(filter_outline(&rows, "", OutlineFilter::Failed).len(), 3);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::generated::temporal::api::{
 };
 use crate::temporal::{
     event_format::structured_attributes,
-    tree::{build_outline, OutlineRow, WorkflowSnapshot},
+    tree::{build_outline, filter_outline, OutlineFilter, OutlineRow, WorkflowSnapshot},
     TemporalClient,
 };
 use crate::ui;
@@ -239,6 +239,11 @@ pub struct WorkflowDetailState {
     pub workflow: Option<WorkflowExecutionInfo>,
     pub history: Vec<HistoryEvent>,
     pub outline: Vec<OutlineRow>,
+    pub outline_all: Vec<OutlineRow>,
+    pub outline_search: String,
+    pub outline_input: String,
+    pub outline_input_mode: bool,
+    pub outline_filter: OutlineFilter,
     pub outline_note: Option<String>,
     pub show_history: bool,
     pub outline_state: TableState,
@@ -270,6 +275,11 @@ impl WorkflowDetailState {
             workflow: None,
             history: Vec::new(),
             outline: Vec::new(),
+            outline_all: Vec::new(),
+            outline_search: String::new(),
+            outline_input: String::new(),
+            outline_input_mode: false,
+            outline_filter: OutlineFilter::All,
             outline_note: None,
             show_history: false,
             outline_state: TableState::default(),
@@ -321,6 +331,29 @@ impl WorkflowDetailState {
         } else {
             (current + len - 1) % len
         }));
+    }
+
+    pub fn apply_outline_filter(&mut self) {
+        let previous = self
+            .outline_state
+            .selected()
+            .and_then(|i| self.outline.get(i))
+            .map(|row| (row.workflow_id.clone(), row.label.clone(), row.is_activity));
+        self.outline = filter_outline(&self.outline_all, &self.outline_search, self.outline_filter);
+        let selection = previous.and_then(|old| {
+            self.outline.iter().position(|row| {
+                (
+                    row.workflow_id.as_str(),
+                    row.label.as_str(),
+                    row.is_activity,
+                ) == (old.0.as_str(), old.1.as_str(), old.2)
+            })
+        });
+        self.outline_state.select(if self.outline.is_empty() {
+            None
+        } else {
+            Some(selection.unwrap_or(0))
+        });
     }
 
     pub fn selected_outline_workflow(&self) -> Option<&WorkflowExecutionInfo> {
@@ -919,14 +952,9 @@ impl App {
                     }
                     self.workflow_detail_state.workflow = Some(workflow);
                     self.workflow_detail_state.history = history;
-                    self.workflow_detail_state.outline = outline;
+                    self.workflow_detail_state.outline_all = outline;
+                    self.workflow_detail_state.apply_outline_filter();
                     self.workflow_detail_state.outline_note = outline_note;
-                    if let Some(index) = self.workflow_detail_state.outline_state.selected() {
-                        let len = self.workflow_detail_state.outline.len();
-                        self.workflow_detail_state
-                            .outline_state
-                            .select((len > 0).then_some(index.min(len.saturating_sub(1))));
-                    }
                     self.workflow_detail_state.last_refresh = Some(std::time::Instant::now());
                     if !self.workflow_detail_state.outline.is_empty()
                         && self
@@ -1400,6 +1428,28 @@ impl App {
                     return Ok(());
                 }
 
+                if self.workflow_detail_state.outline_input_mode {
+                    match key {
+                        KeyCode::Char(c) => self.workflow_detail_state.outline_input.push(c),
+                        KeyCode::Backspace => {
+                            self.workflow_detail_state.outline_input.pop();
+                        }
+                        KeyCode::Enter => {
+                            self.workflow_detail_state.outline_search =
+                                self.workflow_detail_state.outline_input.clone();
+                            self.workflow_detail_state.outline_input_mode = false;
+                            self.workflow_detail_state.apply_outline_filter();
+                        }
+                        KeyCode::Esc => {
+                            self.workflow_detail_state.outline_input_mode = false;
+                            self.workflow_detail_state.outline_input =
+                                self.workflow_detail_state.outline_search.clone();
+                        }
+                        _ => {}
+                    }
+                    return Ok(());
+                }
+
                 // Normal mode key handling
                 match key {
                     KeyCode::Char('q') | KeyCode::Esc => {
@@ -1482,6 +1532,22 @@ impl App {
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         self.workflow_detail_state.select_previous();
+                    }
+                    KeyCode::Char('/') if !self.workflow_detail_state.show_history => {
+                        self.workflow_detail_state.outline_input =
+                            self.workflow_detail_state.outline_search.clone();
+                        self.workflow_detail_state.outline_input_mode = true;
+                    }
+                    KeyCode::Char('f') if !self.workflow_detail_state.show_history => {
+                        self.workflow_detail_state.outline_filter =
+                            self.workflow_detail_state.outline_filter.next();
+                        self.workflow_detail_state.apply_outline_filter();
+                    }
+                    KeyCode::Char('c') if !self.workflow_detail_state.show_history => {
+                        self.workflow_detail_state.outline_filter = OutlineFilter::All;
+                        self.workflow_detail_state.outline_search.clear();
+                        self.workflow_detail_state.outline_input.clear();
+                        self.workflow_detail_state.apply_outline_filter();
                     }
                     KeyCode::Tab => {
                         self.workflow_detail_state.show_history =

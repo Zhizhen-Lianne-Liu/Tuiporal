@@ -226,6 +226,19 @@ fn tree_prefix(rows: &[OutlineRow], index: usize) -> String {
     prefix
 }
 
+fn format_elapsed(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        return format!("{milliseconds}ms");
+    }
+    let seconds = milliseconds / 1_000;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        3600..86400 => format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60),
+        _ => format!("{}d {}h", seconds / 86400, (seconds % 86400) / 3600),
+    }
+}
+
 fn render_outline(app: &App, frame: &mut Frame, area: Rect) {
     let state = &app.workflow_detail_state;
     let running_workflows = state
@@ -244,11 +257,24 @@ fn render_outline(app: &App, frame: &mut Frame, area: Rect) {
         .filter(|row| row.status.active() && row.status != NodeStatus::Running)
         .count();
     let mut title = format!(
-        "Execution tree · {} running workflows · {} running activities",
-        running_workflows, running_activities
+        "Tree [{}] · Running: {} workflows, {} {}",
+        state.outline_filter.label(),
+        running_workflows,
+        running_activities,
+        if running_activities == 1 {
+            "activity"
+        } else {
+            "activities"
+        }
     );
     if waiting > 0 {
         title.push_str(&format!(" · {} queued", waiting));
+    }
+    if !state.outline_search.is_empty() {
+        title.push_str(&format!(
+            " · /{}",
+            state.outline_search.chars().take(18).collect::<String>()
+        ));
     }
     if state.auto_refresh_enabled {
         title.push_str(" · live 5s");
@@ -270,6 +296,32 @@ fn render_outline(app: &App, frame: &mut Frame, area: Rect) {
             Paragraph::new(note.as_str()).style(Style::default().fg(Color::Yellow)),
             note_area,
         );
+    }
+
+    let (table_area, search_area) = if state.outline_input_mode && table_area.height > 4 {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(table_area);
+        (parts[1], Some(parts[0]))
+    } else {
+        (table_area, None)
+    };
+    if let Some(search_area) = search_area {
+        let input = Paragraph::new(format!("/{}_", state.outline_input)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Search workflow / activity"),
+        );
+        frame.render_widget(input, search_area);
+    }
+    if state.outline.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matches. Press c to clear search and filter.")
+                .block(Block::default().borders(Borders::ALL).title(title)),
+            table_area,
+        );
+        return;
     }
 
     let rows: Vec<Row> = state
@@ -302,11 +354,14 @@ fn render_outline(app: &App, frame: &mut Frame, area: Rect) {
                 NodeStatus::Canceled => Color::Magenta,
                 NodeStatus::Unknown => Color::DarkGray,
             };
-            let status = if item.status == NodeStatus::Running {
+            let mut status = if item.status == NodeStatus::Running {
                 format!("{} Running", app.spinner())
             } else {
                 item.status.label().to_owned()
             };
+            if let Some(elapsed) = item.runtime_millis(Utc::now()) {
+                status.push_str(&format!(" · {}", format_elapsed(elapsed)));
+            }
             let row = Row::new(vec![
                 Cell::from(label),
                 Cell::from(status).style(Style::default().fg(color)),
@@ -318,23 +373,20 @@ fn render_outline(app: &App, frame: &mut Frame, area: Rect) {
             }
         })
         .collect();
-    let table = Table::new(
-        rows,
-        [Constraint::Percentage(74), Constraint::Percentage(26)],
-    )
-    .header(
-        Row::new(vec!["Workflow / activity", "State"]).style(
+    let table = Table::new(rows, [Constraint::Min(12), Constraint::Length(26)])
+        .header(
+            Row::new(vec!["Workflow / activity", "State · runtime"]).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .row_highlight_style(
             Style::default()
-                .fg(Color::Cyan)
+                .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(Block::default().borders(Borders::ALL).title(title))
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    );
+        );
     frame.render_stateful_widget(table, table_area, &mut state.outline_state.clone());
 }
 
@@ -705,6 +757,15 @@ mod outline_tests {
     use super::*;
 
     #[test]
+    fn elapsed_time_is_compact() {
+        assert_eq!(format_elapsed(9), "9ms");
+        assert_eq!(format_elapsed(1000), "1s");
+        assert_eq!(format_elapsed(125_000), "2m 05s");
+        assert_eq!(format_elapsed(3_661_000), "1h 01m");
+        assert_eq!(format_elapsed(90_000_000), "1d 1h");
+    }
+
+    #[test]
     fn connectors_show_nested_branches_and_last_children() {
         let depths = [0, 1, 2, 3, 2, 1, 2];
         let rows: Vec<OutlineRow> = depths
@@ -716,6 +777,9 @@ mod outline_tests {
                 status: NodeStatus::Completed,
                 workflow: None,
                 is_activity: false,
+                started_at: None,
+                ended_at: None,
+                reported_duration: None,
             })
             .collect();
         let actual: Vec<String> = (0..rows.len()).map(|i| tree_prefix(&rows, i)).collect();

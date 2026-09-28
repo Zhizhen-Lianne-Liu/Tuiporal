@@ -5,7 +5,7 @@ A Terminal User Interface (TUI) for [Temporal](https://temporal.io) workflow orc
 ## Features
 
 - **Workflow Management**: Parent-only list by default, with search, filters, pagination, and live updates
-- **Execution Tree**: Folder-style child-workflow branches and activities, with animated running indicators and live running/queued/completed states
+- **Execution Tree**: Folder-style child-workflow branches and activities, with live statuses, running indicators, and elapsed runtimes
 - **Workflow Operations**: Terminate, cancel, and signal workflows
 - **Namespace Management**: Browse and switch between namespaces
 - **Authentication**: Temporal Cloud (API key + TLS) and mTLS support
@@ -134,7 +134,9 @@ profiles:
 
 ### Workflow Detail
 - A compact execution header and folder-style tree open by default; statuses refresh every 5 seconds. Running and queued work is highlighted.
+- The state column shows how long each workflow/activity ran; running timers keep ticking. Queued work has no runtime yet.
 - `↑/↓` or `j/k` - Navigate the tree; `Enter` - Open selected child workflow; `ESC` - Return to parent/list
+- `/` - Search names/IDs in the tree, `f` - Cycle All/Active/Failed/Done, `c` - Clear tree search/filter
 - `Tab` - Switch between tree and event history; `Enter` in history - View structured JSON event attributes (including JSON inputs/results)
 - `r` - Refresh now, `a` - Toggle auto-refresh
 - `t` - Terminate, `x` - Cancel, `s` - Signal the selected workflow (confirmation shows its ID)

@@ -13,7 +13,7 @@ use anyhow::Result;
 use app::App;
 use clap::Parser;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::DisableMouseCapture,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -64,7 +64,9 @@ async fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // We do not use mouse events. Let the terminal handle dragging/selection
+    // so text in the TUI can be copied with the usual terminal shortcut.
+    execute!(stdout, DisableMouseCapture, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 

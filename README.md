@@ -144,6 +144,14 @@ profiles:
       enabled: true
 ```
 
+## Copying text
+
+Tuiporal leaves mouse selection to your terminal. Drag over any visible text
+(including event attributes) to select it, then use your terminal's copy
+shortcut: `⌘C` in iTerm2/macOS, or commonly `Ctrl+Shift+C` on Linux. No
+Tuiporal-specific copy command or clipboard permission is required. Scroll
+inside Tuiporal first if the text is not currently visible.
+
 ## Keybindings
 
 ### Global

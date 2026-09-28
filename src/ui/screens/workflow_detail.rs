@@ -257,9 +257,14 @@ fn render_outline(app: &App, frame: &mut Frame, area: Rect) {
         .filter(|row| row.status.active() && row.status != NodeStatus::Running)
         .count();
     let mut title = format!(
-        "Tree [{}] · Running: {} workflows, {} {}",
+        "Tree [{}] · Running: {} {}, {} {}",
         state.outline_filter.label(),
         running_workflows,
+        if running_workflows == 1 {
+            "workflow"
+        } else {
+            "workflows"
+        },
         running_activities,
         if running_activities == 1 {
             "activity"

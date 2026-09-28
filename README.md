@@ -13,6 +13,24 @@ A Terminal User Interface (TUI) for [Temporal](https://temporal.io) workflow orc
 
 ## Quick Start
 
+### Homebrew (macOS)
+
+Install the formula from this repository as a Homebrew tap:
+
+```bash
+brew tap zhizhen-lianne-liu/tuiporal https://github.com/Zhizhen-Lianne-Liu/Tuiporal.git
+brew install zhizhen-lianne-liu/tuiporal/tuiporal
+command -v tuiporal
+```
+
+Homebrew installs the command in its `bin` directory (normally
+`/opt/homebrew/bin` on Apple Silicon Macs), so it works from any directory
+where Homebrew is on `PATH`. The formula builds from pinned source, fetches the
+pinned Temporal API protos, and installs Rust and `protoc` as build dependencies.
+No manual Git clone or Rust setup is required for this option.
+
+### Install with Cargo (macOS/Linux)
+
 Install [Rust and `protoc`](#prerequisites), then install the command **once**:
 
 ```bash
@@ -29,7 +47,7 @@ command -v tuiporal
 `~/.cargo/bin/tuiporal` directly. Agents in containers or on other machines
 need their own installation; this does not install on those machines.
 
-To try it with a local Temporal server:
+To try either installation with a local Temporal server:
 
 ```bash
 docker run -d -p 7233:7233 temporalio/auto-setup:latest
@@ -62,7 +80,9 @@ the terminal where you want the UI.
 **Agent instruction you can paste:** “After starting a Temporal workflow, use
 its returned workflow ID and run ID to run `tuiporal show --workflow-id ID
 --run-id RUN_ID --split`, so I can watch it in iTerm2.” Agents with a different
-`PATH` can run `$HOME/.cargo/bin/tuiporal` instead.
+`PATH` can use the full installed path instead: `/opt/homebrew/bin/tuiporal`
+for the default Apple Silicon Homebrew setup, or `$HOME/.cargo/bin/tuiporal`
+for a Cargo installation.
 
 ### Temporal Cloud
 
@@ -162,7 +182,7 @@ Child relationships use Temporal execution history and `RootWorkflowId` visibili
 
 For development, `cargo build --release` creates a binary in
 `target/release/tuiporal`; it does **not** add a global command. For a globally
-available command, follow [Quick Start](#quick-start) and use `cargo install`.
+available command, follow [Quick Start](#quick-start) and install with Homebrew or Cargo.
 
 The Temporal API is pinned as a Git submodule. For an existing clone, run
 `git submodule update --init`. The build script generates Rust bindings into

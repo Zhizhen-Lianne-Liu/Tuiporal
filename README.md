@@ -25,6 +25,41 @@ cd tuiporal
 cargo run
 ```
 
+### Open a workflow directly (for agents and testing)
+
+Build once in the cloned repository:
+
+```bash
+cargo build
+```
+
+If you know a workflow ID, open its execution without searching the list:
+
+```bash
+./target/debug/tuiporal show --workflow-id my-workflow-id
+```
+
+In **iTerm2 on macOS**, add `--split` to open it beside the terminal session
+that ran the command. Your agent can run the same command using its shell tool:
+
+```bash
+./target/debug/tuiporal show --workflow-id my-workflow-id --split
+```
+
+If you also know the run ID (a workflow ID can have multiple runs), pass it with
+`--run-id my-run-id`. Without it, Tuiporal opens the latest run. The CLI and
+Tuiporal must connect to the **same Temporal server and namespace**; they read
+`~/.tuiporal/config.yaml` as described below. `--split` needs an iTerm2 session
+and creates a new pane each time. Close a workflow with `Esc` (back to list),
+then `q` (exit). Outside iTerm2, omit `--split` and run the command in the
+terminal where you want the UI.
+
+**Agent instruction you can paste:** “After starting a Temporal workflow, use
+its returned workflow ID and run ID to run `tuiporal show --workflow-id ID
+--run-id RUN_ID --split`, so I can watch it in iTerm2.” If you have not
+installed Tuiporal into your PATH, use `./target/debug/tuiporal` instead of
+`tuiporal` and run the command from this repository.
+
 ### Temporal Cloud
 
 Create `~/.tuiporal/config.yaml`:

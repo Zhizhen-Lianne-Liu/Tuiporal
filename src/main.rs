@@ -1,4 +1,5 @@
 mod app;
+mod cli;
 mod config;
 mod events;
 #[allow(dead_code)]
@@ -10,6 +11,7 @@ mod ui;
 
 use anyhow::Result;
 use app::App;
+use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -22,6 +24,27 @@ use std::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = cli::Args::parse();
+    let target = match args.command {
+        Some(cli::Command::Show {
+            workflow_id,
+            run_id,
+            split,
+        }) => {
+            let target = cli::WorkflowTarget {
+                workflow_id,
+                run_id,
+            };
+            target.validate()?;
+            if split {
+                cli::open_in_split(&target)?;
+                return Ok(());
+            }
+            Some(target)
+        }
+        None => None,
+    };
+
     // Keep logs out of the TUI. Opt in to a log file for diagnostics.
     if let Some(path) = std::env::var_os("TUIPORAL_LOG") {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
@@ -36,7 +59,7 @@ async fn main() -> Result<()> {
     }
 
     // Connect before altering terminal state, so startup errors leave it usable.
-    let app = App::new().await?;
+    let app = App::new(target).await?;
 
     // Setup terminal
     enable_raw_mode()?;

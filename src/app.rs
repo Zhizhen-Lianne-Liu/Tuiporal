@@ -441,7 +441,7 @@ pub enum ConnectionStatus {
 }
 
 impl App {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(target: Option<crate::cli::WorkflowTarget>) -> Result<Self> {
         let config = Config::load()?;
         let event_handler = EventHandler::new();
 
@@ -477,6 +477,34 @@ impl App {
         // Connect to Temporal
         app.connect_temporal().await?;
 
+        // A direct link describes the exact execution before the TUI starts. An empty
+        // run ID asks Temporal for the latest run of this workflow ID.
+        let initial_detail = if let Some(target) = target {
+            let client = app.client.as_mut().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}",
+                    match &app.connection_status {
+                        ConnectionStatus::Error(message) => message.as_str(),
+                        _ => "Temporal connection unavailable",
+                    }
+                )
+            })?;
+            let response = client
+                .describe_workflow_execution(
+                    &target.workflow_id,
+                    target.run_id.as_deref().unwrap_or(""),
+                )
+                .await?;
+            Some(response.workflow_execution_info.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Temporal did not return execution details for {}",
+                    target.workflow_id
+                )
+            })?)
+        } else {
+            None
+        };
+
         // Spawn async task handler only after a successful connection.
         let client = app.client.take().ok_or_else(|| {
             anyhow::anyhow!(
@@ -489,9 +517,14 @@ impl App {
         })?;
         app.spawn_task_handler(client, command_rx, result_tx);
 
-        // Load initial workflow list
-        app.workflow_list_state.loading = true;
-        app.load_workflows(app.workflow_list_state.get_query(), Vec::new())?;
+        if let Some(workflow) = initial_detail {
+            app.current_screen = Screen::WorkflowDetail;
+            app.load_detail(workflow, true);
+        } else {
+            // The standard launch still opens the parent-only workflow list.
+            app.workflow_list_state.loading = true;
+            app.load_workflows(app.workflow_list_state.get_query(), Vec::new())?;
+        }
 
         Ok(app)
     }

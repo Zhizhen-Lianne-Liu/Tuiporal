@@ -15,7 +15,8 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     let state = &app.workflow_list_state;
 
     // Split area if we need to show search/filter bar
-    let show_search_bar = state.input_mode || state.active_filter.is_some() || !state.query.is_empty();
+    let show_search_bar =
+        state.input_mode || state.active_filter.is_some() || !state.query.is_empty();
     let (search_area, table_area) = if show_search_bar {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -47,13 +48,12 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
                 Style::default().fg(Color::Yellow),
             )),
         ];
-        let paragraph = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Workflows - Error")
-                    .style(Style::default().fg(Color::Red)),
-            );
+        let paragraph = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Workflows - Error")
+                .style(Style::default().fg(Color::Red)),
+        );
         frame.render_widget(paragraph, table_area);
         return;
     }
@@ -80,8 +80,11 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             ConnectionStatus::Disconnected => ("Not connected to Temporal".to_string(), Color::Red),
             ConnectionStatus::Connecting => {
                 let spinner = app.spinner();
-                (format!("{} Connecting to Temporal...", spinner), Color::Yellow)
-            },
+                (
+                    format!("{} Connecting to Temporal...", spinner),
+                    Color::Yellow,
+                )
+            }
             ConnectionStatus::Error(e) => (format!("Connection error: {}", e), Color::Red),
             ConnectionStatus::Connected => (String::new(), Color::White),
         };
@@ -100,17 +103,23 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     // Show empty message if no workflows
     if state.items.is_empty() {
         let lines = vec![
-            Line::from("No workflows found"),
+            Line::from(if state.show_child_workflows {
+                "No workflows found"
+            } else {
+                "No parent workflows found"
+            }),
             Line::from(""),
-            Line::from(Span::styled("Press 'r' to refresh", Style::default().fg(Color::Yellow))),
+            Line::from(Span::styled(
+                "Press 'r' to refresh",
+                Style::default().fg(Color::Yellow),
+            )),
         ];
-        let paragraph = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Workflows")
-                    .style(Style::default().fg(Color::White)),
-            );
+        let paragraph = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Workflows")
+                .style(Style::default().fg(Color::White)),
+        );
         frame.render_widget(paragraph, table_area);
         return;
     }
@@ -122,7 +131,11 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         Cell::from("Status"),
         Cell::from("Start Time"),
     ])
-    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let rows: Vec<Row> = state
         .items
@@ -160,7 +173,12 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
     ];
 
     // Build title with pagination info and auto-refresh status
-    let mut title = format!("Workflows ({} items)", state.items.len());
+    let scope = if state.show_child_workflows {
+        "All workflows"
+    } else {
+        "Parent workflows"
+    };
+    let mut title = format!("{} ({} items)", scope, state.items.len());
     if state.current_page > 1 || state.has_next_page() {
         title = format!("{} - Page {}", title, state.current_page);
         if state.has_next_page() {
@@ -205,7 +223,9 @@ fn render_search_bar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled("Filter: ", Style::default().fg(Color::Cyan)));
         spans.push(Span::styled(
             filter_text,
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(" | "));
     }
@@ -253,7 +273,8 @@ fn get_workflow_type(workflow: &WorkflowExecutionInfo) -> String {
 }
 
 fn get_workflow_status(workflow: &WorkflowExecutionInfo) -> (WorkflowExecutionStatus, String) {
-    let status = WorkflowExecutionStatus::try_from(workflow.status).unwrap_or(WorkflowExecutionStatus::Unspecified);
+    let status = WorkflowExecutionStatus::try_from(workflow.status)
+        .unwrap_or(WorkflowExecutionStatus::Unspecified);
     let status_str = match status {
         WorkflowExecutionStatus::Running => "Running",
         WorkflowExecutionStatus::Completed => "Completed",
@@ -274,7 +295,8 @@ fn get_workflow_start_time(workflow: &WorkflowExecutionInfo) -> String {
         .and_then(|t| {
             let seconds = t.seconds as i64;
             let nanos = t.nanos as u32;
-            DateTime::from_timestamp(seconds, nanos).map(|dt: DateTime<Utc>| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            DateTime::from_timestamp(seconds, nanos)
+                .map(|dt: DateTime<Utc>| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
         })
         .unwrap_or_else(|| "Unknown".to_string())
 }

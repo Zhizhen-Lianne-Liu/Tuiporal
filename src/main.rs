@@ -1,7 +1,10 @@
 mod app;
 mod config;
 mod events;
-mod generated;
+#[allow(dead_code)]
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/temporal.rs"));
+}
 mod temporal;
 mod ui;
 
@@ -13,13 +16,27 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use std::fs::OpenOptions;
 use std::io;
-use tracing_subscriber;
+use std::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt::init();
+    // Keep logs out of the TUI. Opt in to a log file for diagnostics.
+    if let Some(path) = std::env::var_os("TUIPORAL_LOG") {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        tracing_subscriber::fmt()
+            .with_writer(Mutex::new(file))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(std::io::sink)
+            .init();
+    }
+
+    // Connect before altering terminal state, so startup errors leave it usable.
+    let app = App::new().await?;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -28,8 +45,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app and run
-    let app = App::new().await?;
+    // Run the application
     let res = app.run(&mut terminal).await;
 
     // Restore terminal
@@ -41,9 +57,5 @@ async fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        eprintln!("Error: {:?}", err);
-    }
-
-    Ok(())
+    res
 }

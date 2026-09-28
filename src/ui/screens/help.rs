@@ -71,6 +71,10 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             Span::raw("         → Cycle through status filters (Running/Completed/Failed/etc)"),
         ]),
         Line::from(vec![
+            Span::styled("  v", Style::default().fg(Color::Yellow)),
+            Span::raw("         → Toggle parent-only / all workflows (parent-only by default)"),
+        ]),
+        Line::from(vec![
             Span::styled("  c", Style::default().fg(Color::Yellow)),
             Span::raw("         → Clear search and filters"),
         ]),
@@ -99,11 +103,19 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         )),
         Line::from(vec![
             Span::styled("  ↑/k, ↓/j", Style::default().fg(Color::Yellow)),
-            Span::raw("  → Navigate event history"),
+            Span::raw("  → Navigate tree / event history"),
         ]),
         Line::from(vec![
             Span::styled("  Enter", Style::default().fg(Color::Yellow)),
-            Span::raw("      → View event details"),
+            Span::raw("      → Open child / view selected event"),
+        ]),
+        Line::from(vec![
+            Span::styled("  Tab", Style::default().fg(Color::Yellow)),
+            Span::raw("        → Switch tree / event history"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r / a", Style::default().fg(Color::Yellow)),
+            Span::raw("      → Refresh / toggle live updates"),
         ]),
         Line::from(vec![
             Span::styled("  t", Style::default().fg(Color::Yellow)),
@@ -145,7 +157,10 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         )),
         Line::from(vec![
             Span::raw("  • Use "),
-            Span::styled("Temporal visibility queries", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "Temporal visibility queries",
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(" in search (e.g., WorkflowType='MyWorkflow')"),
         ]),
         Line::from(vec![
@@ -153,12 +168,12 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled("a", Style::default().fg(Color::Yellow)),
             Span::raw(" to enable auto-refresh for real-time monitoring"),
         ]),
-        Line::from(vec![
-            Span::raw("  • Filters and searches can be combined for precise results"),
-        ]),
-        Line::from(vec![
-            Span::raw("  • Current namespace is shown in the Settings screen"),
-        ]),
+        Line::from(vec![Span::raw(
+            "  • Filters and searches can be combined for precise results",
+        )]),
+        Line::from(vec![Span::raw(
+            "  • Current namespace is shown in the Settings screen",
+        )]),
     ];
 
     let total_lines = lines.len() as u16;
@@ -177,7 +192,11 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         if can_scroll_up {
             title.push_str("↑ ");
         }
-        title.push_str(&format!("({}/{})", scroll_offset + visible_lines.min(total_lines), total_lines));
+        title.push_str(&format!(
+            "({}/{})",
+            scroll_offset + visible_lines.min(total_lines),
+            total_lines
+        ));
         if can_scroll_down {
             title.push_str(" ↓");
         }

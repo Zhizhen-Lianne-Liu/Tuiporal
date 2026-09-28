@@ -1,20 +1,22 @@
 use crate::config::{ConnectionProfile, TlsConfig};
 use crate::generated::temporal::api::workflowservice::v1::{
-    workflow_service_client::WorkflowServiceClient, GetSystemInfoRequest,
-    GetWorkflowExecutionHistoryRequest, ListNamespacesRequest, ListWorkflowExecutionsRequest,
-    TerminateWorkflowExecutionRequest, RequestCancelWorkflowExecutionRequest,
-    SignalWorkflowExecutionRequest,
+    workflow_service_client::WorkflowServiceClient, DescribeWorkflowExecutionRequest,
+    GetSystemInfoRequest, GetWorkflowExecutionHistoryRequest, ListNamespacesRequest,
+    ListWorkflowExecutionsRequest, RequestCancelWorkflowExecutionRequest,
+    SignalWorkflowExecutionRequest, TerminateWorkflowExecutionRequest,
 };
-use crate::generated::temporal::api::{common::v1::WorkflowExecution, enums::v1::HistoryEventFilterType};
+use crate::generated::temporal::api::{
+    common::v1::WorkflowExecution, enums::v1::HistoryEventFilterType,
+};
 use anyhow::{Context, Result};
+use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
-use tonic::metadata::MetadataValue;
 
 /// Temporal gRPC client wrapper
 pub struct TemporalClient {
     client: WorkflowServiceClient<Channel>,
     namespace: String,
-    api_key: Option<String>,
+    api_key: Option<MetadataValue<Ascii>>,
 }
 
 impl TemporalClient {
@@ -36,10 +38,30 @@ impl TemporalClient {
         tls_config: Option<&TlsConfig>,
         api_key: Option<String>,
     ) -> Result<Self> {
-        tracing::info!("Connecting to Temporal at {} (namespace: {})", address, namespace);
+        tracing::info!(
+            "Connecting to Temporal at {} (namespace: {})",
+            address,
+            namespace
+        );
+
+        // Never transmit bearer credentials over an unencrypted connection.
+        let use_tls = tls_config.map(|t| t.enabled).unwrap_or(false);
+        if api_key.is_some() && !use_tls {
+            anyhow::bail!("API key authentication requires TLS (tls.enabled: true)");
+        }
+        let api_key = api_key
+            .map(|key| {
+                MetadataValue::try_from(format!("Bearer {}", key))
+                    .context("Invalid API key for authorization header")
+            })
+            .transpose()?;
+        if let Some(tls) = tls_config {
+            if tls.cert_path.is_some() != tls.key_path.is_some() {
+                anyhow::bail!("mTLS requires both cert_path and key_path");
+            }
+        }
 
         // Determine if we should use TLS
-        let use_tls = tls_config.map(|t| t.enabled).unwrap_or(false);
         let scheme = if use_tls { "https" } else { "http" };
 
         // Build the endpoint
@@ -57,8 +79,8 @@ impl TemporalClient {
                     tracing::info!("Configuring mTLS with cert: {:?}", cert_path);
                     let cert = std::fs::read_to_string(cert_path)
                         .context("Failed to read TLS certificate")?;
-                    let key = std::fs::read_to_string(key_path)
-                        .context("Failed to read TLS key")?;
+                    let key =
+                        std::fs::read_to_string(key_path).context("Failed to read TLS key")?;
 
                     let identity = tonic::transport::Identity::from_pem(cert, key);
                     tls_config = tls_config.identity(identity);
@@ -78,7 +100,9 @@ impl TemporalClient {
         }
 
         // Connect to the server
-        let channel = endpoint.connect().await
+        let channel = endpoint
+            .connect()
+            .await
             .context("Failed to connect to Temporal server")?;
 
         // Create client
@@ -91,12 +115,13 @@ impl TemporalClient {
         // Verify connection with a health check
         let mut health_request = tonic::Request::new(GetSystemInfoRequest {});
         if let Some(ref key) = api_key {
-            let key_value = format!("Bearer {}", key);
-            if let Ok(value) = MetadataValue::try_from(&key_value) {
-                health_request.metadata_mut().insert("authorization", value);
-            }
+            health_request
+                .metadata_mut()
+                .insert("authorization", key.clone());
         }
-        client.get_system_info(health_request).await
+        client
+            .get_system_info(health_request)
+            .await
             .context("Health check failed - unable to connect to Temporal")?;
 
         tracing::info!("Successfully connected to Temporal");
@@ -111,10 +136,7 @@ impl TemporalClient {
     /// Helper method to add API key to requests
     fn add_api_key<T>(&self, mut request: tonic::Request<T>) -> tonic::Request<T> {
         if let Some(ref key) = self.api_key {
-            let key_value = format!("Bearer {}", key);
-            if let Ok(value) = MetadataValue::try_from(&key_value) {
-                request.metadata_mut().insert("authorization", value);
-            }
+            request.metadata_mut().insert("authorization", key.clone());
         }
         request
     }
@@ -148,15 +170,37 @@ impl TemporalClient {
         Ok(response.into_inner())
     }
 
-    /// Get workflow execution history
+    /// Read authoritative execution state, including activities currently running in workers.
+    pub async fn describe_workflow_execution(
+        &mut self,
+        workflow_id: &str,
+        run_id: &str,
+    ) -> Result<
+        crate::generated::temporal::api::workflowservice::v1::DescribeWorkflowExecutionResponse,
+    > {
+        let request = self.add_api_key(tonic::Request::new(DescribeWorkflowExecutionRequest {
+            namespace: self.namespace.clone(),
+            execution: Some(WorkflowExecution {
+                workflow_id: workflow_id.to_owned(),
+                run_id: run_id.to_owned(),
+            }),
+        }));
+        Ok(self
+            .client
+            .describe_workflow_execution(request)
+            .await?
+            .into_inner())
+    }
+
     pub async fn get_workflow_execution_history(
         &mut self,
         workflow_id: String,
         run_id: String,
         page_size: i32,
         next_page_token: Vec<u8>,
-    ) -> Result<crate::generated::temporal::api::workflowservice::v1::GetWorkflowExecutionHistoryResponse>
-    {
+    ) -> Result<
+        crate::generated::temporal::api::workflowservice::v1::GetWorkflowExecutionHistoryResponse,
+    > {
         let request = self.add_api_key(tonic::Request::new(GetWorkflowExecutionHistoryRequest {
             namespace: self.namespace.clone(),
             execution: Some(WorkflowExecution {
@@ -172,6 +216,36 @@ impl TemporalClient {
 
         let response = self.client.get_workflow_execution_history(request).await?;
         Ok(response.into_inner())
+    }
+
+    /// Read every history page for one execution (including empty histories).
+    pub async fn history_events(
+        &mut self,
+        workflow_id: &str,
+        run_id: &str,
+    ) -> Result<Vec<crate::generated::temporal::api::history::v1::HistoryEvent>> {
+        let mut events = Vec::new();
+        let mut token = Vec::new();
+        loop {
+            let response = self
+                .get_workflow_execution_history(
+                    workflow_id.to_owned(),
+                    run_id.to_owned(),
+                    200,
+                    token.clone(),
+                )
+                .await?;
+            if let Some(history) = response.history {
+                events.extend(history.events);
+            }
+            if response.next_page_token.is_empty() {
+                return Ok(events);
+            }
+            if response.next_page_token == token {
+                anyhow::bail!("History pagination did not advance");
+            }
+            token = response.next_page_token;
+        }
     }
 
     /// List all namespaces
@@ -223,14 +297,15 @@ impl TemporalClient {
 
     /// Request cancellation of a workflow execution
     pub async fn cancel_workflow(&mut self, workflow_id: String, run_id: String) -> Result<()> {
-        let request = self.add_api_key(tonic::Request::new(RequestCancelWorkflowExecutionRequest {
-            namespace: self.namespace.clone(),
-            workflow_execution: Some(WorkflowExecution {
-                workflow_id,
-                run_id,
-            }),
-            ..Default::default()
-        }));
+        let request =
+            self.add_api_key(tonic::Request::new(RequestCancelWorkflowExecutionRequest {
+                namespace: self.namespace.clone(),
+                workflow_execution: Some(WorkflowExecution {
+                    workflow_id,
+                    run_id,
+                }),
+                ..Default::default()
+            }));
 
         self.client
             .request_cancel_workflow_execution(request)
@@ -257,5 +332,40 @@ impl TemporalClient {
 
         self.client.signal_workflow_execution(request).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn api_key_requires_tls() {
+        let error = TemporalClient::connect(
+            "localhost:7233".into(),
+            "default".into(),
+            None,
+            Some("secret".into()),
+        )
+        .await
+        .err()
+        .expect("insecure API key must be rejected");
+        assert!(error.to_string().contains("requires TLS"));
+    }
+
+    #[tokio::test]
+    async fn incomplete_mtls_is_rejected() {
+        let tls = TlsConfig {
+            enabled: true,
+            cert_path: Some("client.pem".into()),
+            key_path: None,
+            ca_path: None,
+        };
+        let error =
+            TemporalClient::connect("localhost:7233".into(), "default".into(), Some(&tls), None)
+                .await
+                .err()
+                .expect("incomplete mTLS must be rejected");
+        assert!(error.to_string().contains("both cert_path and key_path"));
     }
 }

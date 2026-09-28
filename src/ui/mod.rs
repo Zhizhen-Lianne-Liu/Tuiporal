@@ -14,8 +14,8 @@ pub fn render(app: &App, frame: &mut Frame) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
-            Constraint::Min(0),     // Content
-            Constraint::Length(1),  // Footer
+            Constraint::Min(0),    // Content
+            Constraint::Length(1), // Footer
         ])
         .split(frame.area());
 
@@ -54,7 +54,11 @@ fn render_header(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
     let title = format!("Tuiporal {} | ns: {}", status_icon, app.current_namespace);
 
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(Span::styled(title, Style::default().fg(status_color))))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, Style::default().fg(status_color))),
+        )
         .highlight_style(
             Style::default()
                 .fg(Color::Yellow)
@@ -76,6 +80,8 @@ fn render_footer(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
                     Span::styled("ESC", Style::default().fg(Color::Yellow)),
                     Span::raw(" cancel"),
                 ])
+            } else if area.width < 120 {
+                Line::from("j/k move · Enter tree · v parent/all · / search · f filter · r refresh · ? help · q quit")
             } else {
                 let mut help_spans = vec![
                     Span::styled("↑/k", Style::default().fg(Color::Yellow)),
@@ -90,12 +96,16 @@ fn render_footer(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
                     Span::raw(" filter | "),
                     Span::styled("c", Style::default().fg(Color::Yellow)),
                     Span::raw(" clear | "),
+                    Span::styled("v", Style::default().fg(Color::Yellow)),
+                    Span::raw(" parent/all | "),
                     Span::styled("a", Style::default().fg(Color::Yellow)),
                     Span::raw(" auto | "),
                 ];
 
                 // Add pagination hints if applicable
-                if app.workflow_list_state.has_prev_page() || app.workflow_list_state.has_next_page() {
+                if app.workflow_list_state.has_prev_page()
+                    || app.workflow_list_state.has_next_page()
+                {
                     if app.workflow_list_state.has_prev_page() {
                         help_spans.push(Span::styled("←/p", Style::default().fg(Color::Yellow)));
                         help_spans.push(Span::raw(" prev | "));
@@ -153,30 +163,11 @@ fn render_footer(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
                     Span::raw(" cancel"),
                 ])
             } else if app.workflow_detail_state.success_message.is_some() {
-                Line::from(vec![
-                    Span::raw("Press any key to continue"),
-                ])
+                Line::from(vec![Span::raw("Press any key to continue")])
+            } else if app.workflow_detail_state.show_history {
+                Line::from("j/k navigate · Enter event · Tab tree · r refresh · Esc back")
             } else {
-                Line::from(vec![
-                    Span::styled("↑/k", Style::default().fg(Color::Yellow)),
-                    Span::raw("/"),
-                    Span::styled("↓/j", Style::default().fg(Color::Yellow)),
-                    Span::raw(" nav | "),
-                    Span::styled("Enter", Style::default().fg(Color::Yellow)),
-                    Span::raw(" view | "),
-                    Span::styled("t", Style::default().fg(Color::Yellow)),
-                    Span::raw(" terminate | "),
-                    Span::styled("x", Style::default().fg(Color::Yellow)),
-                    Span::raw(" cancel | "),
-                    Span::styled("s", Style::default().fg(Color::Yellow)),
-                    Span::raw(" signal | "),
-                    Span::styled("?", Style::default().fg(Color::Yellow)),
-                    Span::raw(" help | "),
-                    Span::styled("ESC", Style::default().fg(Color::Yellow)),
-                    Span::raw(" back | "),
-                    Span::styled("q", Style::default().fg(Color::Yellow)),
-                    Span::raw(" quit"),
-                ])
+                Line::from("j/k navigate · Enter child · Tab events · r refresh · a auto · t/x/s action · Esc back")
             }
         }
         Screen::Help => Line::from(vec![

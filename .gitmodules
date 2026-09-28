@@ -1,0 +1,3 @@
+[submodule "proto/temporal-api"]
+	path = proto/temporal-api
+	url = https://github.com/temporalio/api.git

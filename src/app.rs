@@ -1,11 +1,13 @@
 use crate::config::Config;
 use crate::events::{Event, EventHandler};
 use crate::generated::temporal::api::{
-    history::v1::HistoryEvent,
+    history::v1::HistoryEvent, workflow::v1::WorkflowExecutionInfo,
     workflowservice::v1::DescribeNamespaceResponse,
-    workflow::v1::WorkflowExecutionInfo,
 };
-use crate::temporal::TemporalClient;
+use crate::temporal::{
+    tree::{build_outline, OutlineRow, WorkflowSnapshot},
+    TemporalClient,
+};
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::KeyCode;
@@ -23,15 +25,13 @@ pub enum Screen {
 /// Commands that can be sent to the async task handler
 #[derive(Debug, Clone)]
 pub enum AppCommand {
-    RefreshWorkflows(String), // query
-    LoadNextPage(String, Vec<u8>), // query, page_token
-    LoadPreviousPage(String), // query - will start fresh and rebuild
-    ViewWorkflowDetail(String, String), // workflow_id, run_id
+    LoadWorkflows(String, Vec<u8>, u64), // query, page token, request ID
+    ViewWorkflowDetail(WorkflowExecutionInfo, u64), // selected execution, request ID
     RefreshNamespaces,
     SwitchNamespace(String),
     TerminateWorkflow(String, String, String), // workflow_id, run_id, reason
-    CancelWorkflow(String, String),             // workflow_id, run_id
-    SignalWorkflow(String, String, String),     // workflow_id, run_id, signal_name
+    CancelWorkflow(String, String),            // workflow_id, run_id
+    SignalWorkflow(String, String, String),    // workflow_id, run_id, signal_name
 }
 
 /// Results from async operations
@@ -40,13 +40,17 @@ pub enum AppResult {
     WorkflowsLoaded {
         workflows: Vec<WorkflowExecutionInfo>,
         next_page_token: Vec<u8>,
+        request_id: u64,
     },
-    WorkflowsError(String),
+    WorkflowsError(u64, String),
     WorkflowDetailLoaded {
         workflow: WorkflowExecutionInfo,
         history: Vec<HistoryEvent>,
+        outline: Vec<OutlineRow>,
+        outline_note: Option<String>,
+        request_id: u64,
     },
-    WorkflowDetailError(String),
+    WorkflowDetailError(u64, String),
     NamespacesLoaded {
         namespaces: Vec<DescribeNamespaceResponse>,
     },
@@ -64,7 +68,9 @@ pub struct WorkflowListState {
     pub items: Vec<WorkflowExecutionInfo>,
     pub table_state: TableState,
     pub next_page_token: Vec<u8>,
-    pub prev_page_tokens: Vec<Vec<u8>>, // Stack of previous page tokens
+    pub prev_page_tokens: Vec<Vec<u8>>, // Tokens used to fetch preceding pages
+    pub current_page_token: Vec<u8>,
+    pub request_id: u64,
     pub loading: bool,
     pub error: Option<String>,
     pub current_page: usize,
@@ -72,6 +78,7 @@ pub struct WorkflowListState {
     pub query_history: Vec<String>,
     pub input_mode: bool,
     pub active_filter: Option<WorkflowFilter>,
+    pub show_child_workflows: bool,
     pub auto_refresh_enabled: bool,
     pub auto_refresh_interval_secs: u64,
     pub last_refresh: Option<std::time::Instant>,
@@ -93,6 +100,8 @@ impl WorkflowListState {
             table_state: TableState::default(),
             next_page_token: Vec::new(),
             prev_page_tokens: Vec::new(),
+            current_page_token: Vec::new(),
+            request_id: 0,
             loading: false,
             error: None,
             current_page: 1,
@@ -100,6 +109,7 @@ impl WorkflowListState {
             query_history: Vec::new(),
             input_mode: false,
             active_filter: None,
+            show_child_workflows: false,
             auto_refresh_enabled: false,
             auto_refresh_interval_secs: 5, // Default 5 seconds
             last_refresh: None,
@@ -127,6 +137,9 @@ impl WorkflowListState {
     pub fn get_query(&self) -> String {
         // Build query from active filter and custom query
         let mut queries = Vec::new();
+        if !self.show_child_workflows {
+            queries.push("ParentWorkflowId IS NULL".to_string());
+        }
 
         if let Some(filter) = &self.active_filter {
             let filter_query = match filter {
@@ -142,7 +155,8 @@ impl WorkflowListState {
         }
 
         if !self.query.is_empty() {
-            queries.push(self.query.clone());
+            // Preserve the parent constraint even when a custom query contains OR.
+            queries.push(format!("({})", self.query));
         }
 
         queries.join(" AND ")
@@ -154,6 +168,29 @@ impl WorkflowListState {
 
     pub fn has_prev_page(&self) -> bool {
         !self.prev_page_tokens.is_empty()
+    }
+
+    // Page tokens identify the page to request, not the page returned by the server.
+    pub fn begin_next_page(&mut self) -> Option<Vec<u8>> {
+        if self.loading || !self.has_next_page() {
+            return None;
+        }
+        self.prev_page_tokens.push(self.current_page_token.clone());
+        self.current_page_token = self.next_page_token.clone();
+        self.current_page += 1;
+        self.loading = true;
+        Some(self.current_page_token.clone())
+    }
+
+    pub fn begin_previous_page(&mut self) -> Option<Vec<u8>> {
+        if self.loading {
+            return None;
+        }
+        let token = self.prev_page_tokens.pop()?;
+        self.current_page_token = token.clone();
+        self.current_page = self.current_page.saturating_sub(1).max(1);
+        self.loading = true;
+        Some(token)
     }
 
     pub fn select_next(&mut self) {
@@ -191,9 +228,7 @@ impl WorkflowListState {
     }
 
     pub fn selected_workflow(&self) -> Option<&WorkflowExecutionInfo> {
-        self.table_state
-            .selected()
-            .and_then(|i| self.items.get(i))
+        self.table_state.selected().and_then(|i| self.items.get(i))
     }
 }
 
@@ -202,10 +237,18 @@ impl WorkflowListState {
 pub struct WorkflowDetailState {
     pub workflow: Option<WorkflowExecutionInfo>,
     pub history: Vec<HistoryEvent>,
+    pub outline: Vec<OutlineRow>,
+    pub outline_note: Option<String>,
+    pub show_history: bool,
+    pub outline_state: TableState,
+    pub auto_refresh_enabled: bool,
+    pub last_refresh: Option<std::time::Instant>,
     pub table_state: TableState,
     pub loading: bool,
+    pub refreshing: bool,
     pub error: Option<String>,
     pub show_dialog: Option<WorkflowOperation>,
+    pub dialog_workflow: Option<WorkflowExecutionInfo>,
     pub dialog_input: String,
     pub success_message: Option<String>,
     pub show_event_detail: bool,
@@ -224,10 +267,18 @@ impl WorkflowDetailState {
         Self {
             workflow: None,
             history: Vec::new(),
+            outline: Vec::new(),
+            outline_note: None,
+            show_history: false,
+            outline_state: TableState::default(),
+            auto_refresh_enabled: true,
+            last_refresh: None,
             table_state: TableState::default(),
             loading: false,
+            refreshing: false,
             error: None,
             show_dialog: None,
+            dialog_workflow: None,
             dialog_input: String::new(),
             success_message: None,
             show_event_detail: false,
@@ -242,37 +293,38 @@ impl WorkflowDetailState {
     }
 
     pub fn select_next(&mut self) {
-        if self.history.is_empty() {
-            return;
+        if self.show_history {
+            Self::advance(&mut self.table_state, self.history.len(), true);
+        } else {
+            Self::advance(&mut self.outline_state, self.outline.len(), true);
         }
-        let i = match self.table_state.selected() {
-            Some(i) => {
-                if i >= self.history.len() - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.table_state.select(Some(i));
     }
 
     pub fn select_previous(&mut self) {
-        if self.history.is_empty() {
+        if self.show_history {
+            Self::advance(&mut self.table_state, self.history.len(), false);
+        } else {
+            Self::advance(&mut self.outline_state, self.outline.len(), false);
+        }
+    }
+
+    fn advance(state: &mut TableState, len: usize, forward: bool) {
+        if len == 0 {
             return;
         }
-        let i = match self.table_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    self.history.len() - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.table_state.select(Some(i));
+        let current = state.selected().unwrap_or(0);
+        state.select(Some(if forward {
+            (current + 1) % len
+        } else {
+            (current + len - 1) % len
+        }));
+    }
+
+    pub fn selected_outline_workflow(&self) -> Option<&WorkflowExecutionInfo> {
+        self.outline_state
+            .selected()
+            .and_then(|i| self.outline.get(i))
+            .and_then(|r| r.workflow.as_ref())
     }
 }
 
@@ -330,9 +382,7 @@ impl NamespaceListState {
     }
 
     pub fn selected_namespace(&self) -> Option<&DescribeNamespaceResponse> {
-        self.table_state
-            .selected()
-            .and_then(|i| self.items.get(i))
+        self.table_state.selected().and_then(|i| self.items.get(i))
     }
 }
 
@@ -344,9 +394,7 @@ pub struct HelpState {
 
 impl HelpState {
     pub fn new() -> Self {
-        Self {
-            scroll_offset: 0,
-        }
+        Self { scroll_offset: 0 }
     }
 
     pub fn scroll_down(&mut self, amount: u16) {
@@ -375,6 +423,8 @@ pub struct App {
     pub connection_status: ConnectionStatus,
     pub current_namespace: String,
     pub frame_count: u16,
+    detail_request_id: u64,
+    detail_back_stack: Vec<WorkflowExecutionInfo>,
     command_tx: mpsc::UnboundedSender<AppCommand>,
     result_rx: mpsc::UnboundedReceiver<AppResult>,
 }
@@ -415,6 +465,8 @@ impl App {
             connection_status: ConnectionStatus::Disconnected,
             current_namespace: initial_namespace,
             frame_count: 0,
+            detail_request_id: 0,
+            detail_back_stack: Vec::new(),
             command_tx,
             result_rx,
         };
@@ -422,13 +474,21 @@ impl App {
         // Connect to Temporal
         app.connect_temporal().await?;
 
-        // Spawn async task handler
-        if let Some(client) = app.client.take() {
-            app.spawn_task_handler(client, command_rx, result_tx);
-        }
+        // Spawn async task handler only after a successful connection.
+        let client = app.client.take().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                match &app.connection_status {
+                    ConnectionStatus::Error(message) => message.as_str(),
+                    _ => "Temporal connection unavailable",
+                }
+            )
+        })?;
+        app.spawn_task_handler(client, command_rx, result_tx);
 
         // Load initial workflow list
-        app.command_tx.send(AppCommand::RefreshWorkflows(String::new()))?;
+        app.workflow_list_state.loading = true;
+        app.load_workflows(app.workflow_list_state.get_query(), Vec::new())?;
 
         Ok(app)
     }
@@ -442,88 +502,186 @@ impl App {
         tokio::spawn(async move {
             while let Some(command) = command_rx.recv().await {
                 match command {
-                    AppCommand::RefreshWorkflows(query) => {
+                    AppCommand::LoadWorkflows(query, page_token, request_id) => {
                         tracing::info!("Loading workflows with query: '{}'", query);
-                        match client
-                            .list_workflow_executions(50, Vec::new(), query)
-                            .await
-                        {
+                        match client.list_workflow_executions(50, page_token, query).await {
                             Ok(response) => {
                                 let _ = result_tx.send(AppResult::WorkflowsLoaded {
                                     workflows: response.executions,
                                     next_page_token: response.next_page_token,
+                                    request_id,
                                 });
                             }
                             Err(e) => {
-                                let _ = result_tx
-                                    .send(AppResult::WorkflowsError(format!("Failed to load workflows: {}", e)));
+                                let _ = result_tx.send(AppResult::WorkflowsError(
+                                    request_id,
+                                    format!("Failed to load workflows: {}", e),
+                                ));
                             }
                         }
                     }
-                    AppCommand::LoadNextPage(query, page_token) => {
-                        tracing::info!("Loading next page with query: '{}'", query);
-                        match client
-                            .list_workflow_executions(50, page_token, query)
-                            .await
-                        {
-                            Ok(response) => {
-                                let _ = result_tx.send(AppResult::WorkflowsLoaded {
-                                    workflows: response.executions,
-                                    next_page_token: response.next_page_token,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = result_tx
-                                    .send(AppResult::WorkflowsError(format!("Failed to load next page: {}", e)));
-                            }
-                        }
-                    }
-                    AppCommand::LoadPreviousPage(query) => {
-                        tracing::info!("Loading previous page with query: '{}'", query);
-                        // Load from the beginning (previous page is handled on the client side)
-                        match client
-                            .list_workflow_executions(50, Vec::new(), query)
-                            .await
-                        {
-                            Ok(response) => {
-                                let _ = result_tx.send(AppResult::WorkflowsLoaded {
-                                    workflows: response.executions,
-                                    next_page_token: response.next_page_token,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = result_tx
-                                    .send(AppResult::WorkflowsError(format!("Failed to load previous page: {}", e)));
-                            }
-                        }
-                    }
-                    AppCommand::ViewWorkflowDetail(workflow_id, run_id) => {
-                        tracing::info!("Loading workflow detail: {}", workflow_id);
-
-                        // First, find the workflow in our list
-                        let workflow_info = client
-                            .list_workflow_executions(1, Vec::new(), format!("WorkflowId = '{}'", workflow_id))
-                            .await
-                            .ok()
-                            .and_then(|response| response.executions.into_iter().next());
-
-                        // Get the history
-                        match client
-                            .get_workflow_execution_history(workflow_id.clone(), run_id, 100, Vec::new())
-                            .await
-                        {
-                            Ok(response) => {
-                                if let Some(history) = response.history {
+                    AppCommand::ViewWorkflowDetail(workflow, request_id) => {
+                        if let Some(execution) = &workflow.execution {
+                            let execution = execution.clone();
+                            match client
+                                .history_events(&execution.workflow_id, &execution.run_id)
+                                .await
+                            {
+                                Ok(history) => {
+                                    let root_id = workflow
+                                        .root_execution
+                                        .as_ref()
+                                        .unwrap_or(&execution)
+                                        .workflow_id
+                                        .clone();
+                                    let query = format!(
+                                        "RootWorkflowId = '{}'",
+                                        root_id.replace('\'', "''")
+                                    );
+                                    let mut infos = Vec::new();
+                                    let mut page_token = Vec::new();
+                                    let mut outline_note = None;
+                                    loop {
+                                        match client
+                                            .list_workflow_executions(
+                                                100,
+                                                page_token.clone(),
+                                                query.clone(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(response) => {
+                                                infos.extend(response.executions);
+                                                if response.next_page_token.is_empty() {
+                                                    break;
+                                                }
+                                                if response.next_page_token == page_token
+                                                    || infos.len() >= 100
+                                                {
+                                                    outline_note = Some(
+                                                        "Outline limited to 100 workflows".into(),
+                                                    );
+                                                    break;
+                                                }
+                                                page_token = response.next_page_token;
+                                            }
+                                            Err(e) => {
+                                                outline_note = Some(format!(
+                                                    "Child workflow lookup failed: {}",
+                                                    e
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let selected_from_list = infos
+                                        .iter()
+                                        .find(|info| info.execution.as_ref() == Some(&execution))
+                                        .cloned()
+                                        .unwrap_or(workflow);
+                                    let (selected, pending_activities, pending_children) =
+                                        match client
+                                            .describe_workflow_execution(
+                                                &execution.workflow_id,
+                                                &execution.run_id,
+                                            )
+                                            .await
+                                        {
+                                            Ok(description) => (
+                                                description
+                                                    .workflow_execution_info
+                                                    .unwrap_or(selected_from_list),
+                                                description.pending_activities,
+                                                description.pending_children,
+                                            ),
+                                            Err(e) => {
+                                                outline_note = Some(format!(
+                                                    "Live activity status unavailable: {}",
+                                                    e
+                                                ));
+                                                (selected_from_list, Vec::new(), Vec::new())
+                                            }
+                                        };
+                                    let mut snapshots = vec![WorkflowSnapshot {
+                                        info: selected.clone(),
+                                        history: history.clone(),
+                                        pending_activities,
+                                        pending_children,
+                                    }];
+                                    for info in infos {
+                                        let Some(child) = &info.execution else {
+                                            continue;
+                                        };
+                                        if child == &execution {
+                                            continue;
+                                        }
+                                        let child_id = child.workflow_id.clone();
+                                        let child_run = child.run_id.clone();
+                                        let child_history = match client
+                                            .history_events(&child_id, &child_run)
+                                            .await
+                                        {
+                                            Ok(events) => events,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Could not read child history {}: {}",
+                                                    child_id,
+                                                    e
+                                                );
+                                                outline_note = Some(
+                                                    "Some child histories could not be loaded"
+                                                        .into(),
+                                                );
+                                                Vec::new()
+                                            }
+                                        };
+                                        let (info, pending_activities, pending_children) =
+                                            match client
+                                                .describe_workflow_execution(&child_id, &child_run)
+                                                .await
+                                            {
+                                                Ok(description) => (
+                                                    description
+                                                        .workflow_execution_info
+                                                        .unwrap_or(info),
+                                                    description.pending_activities,
+                                                    description.pending_children,
+                                                ),
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "Could not describe child {}: {}",
+                                                        child_id,
+                                                        e
+                                                    );
+                                                    outline_note = Some(
+                                                        "Some live child statuses unavailable"
+                                                            .into(),
+                                                    );
+                                                    (info, Vec::new(), Vec::new())
+                                                }
+                                            };
+                                        snapshots.push(WorkflowSnapshot {
+                                            info,
+                                            history: child_history,
+                                            pending_activities,
+                                            pending_children,
+                                        });
+                                    }
+                                    let outline = build_outline(&snapshots, &selected);
                                     let _ = result_tx.send(AppResult::WorkflowDetailLoaded {
-                                        workflow: workflow_info.unwrap_or_default(),
-                                        history: history.events,
+                                        workflow: selected,
+                                        history,
+                                        outline,
+                                        outline_note,
+                                        request_id,
                                     });
                                 }
-                            }
-                            Err(e) => {
-                                let _ = result_tx.send(AppResult::WorkflowDetailError(
-                                    format!("Failed to load workflow detail: {}", e),
-                                ));
+                                Err(e) => {
+                                    let _ = result_tx.send(AppResult::WorkflowDetailError(
+                                        request_id,
+                                        format!("Failed to load workflow detail: {}", e),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -536,9 +694,10 @@ impl App {
                                 });
                             }
                             Err(e) => {
-                                let _ = result_tx.send(AppResult::NamespacesError(
-                                    format!("Failed to load namespaces: {}", e),
-                                ));
+                                let _ = result_tx.send(AppResult::NamespacesError(format!(
+                                    "Failed to load namespaces: {}",
+                                    e
+                                )));
                             }
                         }
                     }
@@ -548,17 +707,25 @@ impl App {
                         let _ = result_tx.send(AppResult::NamespaceSwitched { namespace });
                     }
                     AppCommand::TerminateWorkflow(workflow_id, run_id, reason) => {
-                        tracing::info!("Terminating workflow: {} with reason: {}", workflow_id, reason);
-                        match client.terminate_workflow(workflow_id.clone(), run_id, reason).await {
+                        tracing::info!(
+                            "Terminating workflow: {} with reason: {}",
+                            workflow_id,
+                            reason
+                        );
+                        match client
+                            .terminate_workflow(workflow_id.clone(), run_id, reason)
+                            .await
+                        {
                             Ok(_) => {
                                 let _ = result_tx.send(AppResult::WorkflowOperationSuccess(
                                     format!("Workflow {} terminated successfully", workflow_id),
                                 ));
                             }
                             Err(e) => {
-                                let _ = result_tx.send(AppResult::WorkflowOperationError(
-                                    format!("Failed to terminate workflow: {}", e),
-                                ));
+                                let _ = result_tx.send(AppResult::WorkflowOperationError(format!(
+                                    "Failed to terminate workflow: {}",
+                                    e
+                                )));
                             }
                         }
                     }
@@ -566,29 +733,42 @@ impl App {
                         tracing::info!("Canceling workflow: {}", workflow_id);
                         match client.cancel_workflow(workflow_id.clone(), run_id).await {
                             Ok(_) => {
-                                let _ = result_tx.send(AppResult::WorkflowOperationSuccess(
-                                    format!("Workflow {} cancel requested successfully", workflow_id),
-                                ));
+                                let _ =
+                                    result_tx.send(AppResult::WorkflowOperationSuccess(format!(
+                                        "Workflow {} cancel requested successfully",
+                                        workflow_id
+                                    )));
                             }
                             Err(e) => {
-                                let _ = result_tx.send(AppResult::WorkflowOperationError(
-                                    format!("Failed to cancel workflow: {}", e),
-                                ));
+                                let _ = result_tx.send(AppResult::WorkflowOperationError(format!(
+                                    "Failed to cancel workflow: {}",
+                                    e
+                                )));
                             }
                         }
                     }
                     AppCommand::SignalWorkflow(workflow_id, run_id, signal_name) => {
-                        tracing::info!("Signaling workflow: {} with signal: {}", workflow_id, signal_name);
-                        match client.signal_workflow(workflow_id.clone(), run_id, signal_name.clone()).await {
+                        tracing::info!(
+                            "Signaling workflow: {} with signal: {}",
+                            workflow_id,
+                            signal_name
+                        );
+                        match client
+                            .signal_workflow(workflow_id.clone(), run_id, signal_name.clone())
+                            .await
+                        {
                             Ok(_) => {
-                                let _ = result_tx.send(AppResult::WorkflowOperationSuccess(
-                                    format!("Signal '{}' sent to workflow {} successfully", signal_name, workflow_id),
-                                ));
+                                let _ =
+                                    result_tx.send(AppResult::WorkflowOperationSuccess(format!(
+                                        "Signal '{}' sent to workflow {} successfully",
+                                        signal_name, workflow_id
+                                    )));
                             }
                             Err(e) => {
-                                let _ = result_tx.send(AppResult::WorkflowOperationError(
-                                    format!("Failed to signal workflow: {}", e),
-                                ));
+                                let _ = result_tx.send(AppResult::WorkflowOperationError(format!(
+                                    "Failed to signal workflow: {}",
+                                    e
+                                )));
                             }
                         }
                     }
@@ -623,6 +803,32 @@ impl App {
         Ok(())
     }
 
+    fn load_workflows(&mut self, query: String, page_token: Vec<u8>) -> Result<()> {
+        self.workflow_list_state.request_id = self.workflow_list_state.request_id.wrapping_add(1);
+        self.command_tx.send(AppCommand::LoadWorkflows(
+            query,
+            page_token,
+            self.workflow_list_state.request_id,
+        ))?;
+        Ok(())
+    }
+
+    fn load_detail(&mut self, workflow: WorkflowExecutionInfo, reset: bool) {
+        if reset {
+            self.workflow_detail_state = WorkflowDetailState::new();
+        }
+        self.detail_request_id = self.detail_request_id.wrapping_add(1);
+        if reset {
+            self.workflow_detail_state.loading = true;
+        } else {
+            self.workflow_detail_state.refreshing = true;
+        }
+        let _ = self.command_tx.send(AppCommand::ViewWorkflowDetail(
+            workflow,
+            self.detail_request_id,
+        ));
+    }
+
     fn process_results(&mut self) {
         // Process all available results from async tasks
         while let Ok(result) = self.result_rx.try_recv() {
@@ -630,7 +836,11 @@ impl App {
                 AppResult::WorkflowsLoaded {
                     workflows,
                     next_page_token,
+                    request_id,
                 } => {
+                    if request_id != self.workflow_list_state.request_id {
+                        continue;
+                    }
                     self.workflow_list_state.items = workflows;
                     self.workflow_list_state.next_page_token = next_page_token;
                     self.workflow_list_state.loading = false;
@@ -642,19 +852,57 @@ impl App {
                         self.workflow_list_state.table_state.select(Some(0));
                     }
 
-                    tracing::info!("Loaded {} workflows (page {})",
-                                   self.workflow_list_state.items.len(),
-                                   self.workflow_list_state.current_page);
+                    tracing::info!(
+                        "Loaded {} workflows (page {})",
+                        self.workflow_list_state.items.len(),
+                        self.workflow_list_state.current_page
+                    );
                 }
-                AppResult::WorkflowsError(error) => {
+                AppResult::WorkflowsError(request_id, error) => {
+                    if request_id != self.workflow_list_state.request_id {
+                        continue;
+                    }
+                    self.workflow_list_state.current_page = 1;
+                    self.workflow_list_state.current_page_token.clear();
+                    self.workflow_list_state.prev_page_tokens.clear();
+                    self.workflow_list_state.items.clear();
+                    self.workflow_list_state.next_page_token.clear();
                     self.workflow_list_state.error = Some(error.clone());
                     self.workflow_list_state.loading = false;
                     tracing::error!("{}", error);
                 }
-                AppResult::WorkflowDetailLoaded { workflow, history } => {
+                AppResult::WorkflowDetailLoaded {
+                    workflow,
+                    history,
+                    outline,
+                    outline_note,
+                    request_id,
+                } => {
+                    if request_id != self.detail_request_id {
+                        continue;
+                    }
                     self.workflow_detail_state.workflow = Some(workflow);
                     self.workflow_detail_state.history = history;
+                    self.workflow_detail_state.outline = outline;
+                    self.workflow_detail_state.outline_note = outline_note;
+                    if let Some(index) = self.workflow_detail_state.outline_state.selected() {
+                        let len = self.workflow_detail_state.outline.len();
+                        self.workflow_detail_state
+                            .outline_state
+                            .select((len > 0).then_some(index.min(len.saturating_sub(1))));
+                    }
+                    self.workflow_detail_state.last_refresh = Some(std::time::Instant::now());
+                    if !self.workflow_detail_state.outline.is_empty()
+                        && self
+                            .workflow_detail_state
+                            .outline_state
+                            .selected()
+                            .is_none()
+                    {
+                        self.workflow_detail_state.outline_state.select(Some(0));
+                    }
                     self.workflow_detail_state.loading = false;
+                    self.workflow_detail_state.refreshing = false;
                     self.workflow_detail_state.error = None;
 
                     // Select first event if list is not empty
@@ -664,11 +912,23 @@ impl App {
                         self.workflow_detail_state.table_state.select(Some(0));
                     }
 
-                    tracing::info!("Loaded {} history events", self.workflow_detail_state.history.len());
+                    tracing::info!(
+                        "Loaded {} history events",
+                        self.workflow_detail_state.history.len()
+                    );
                 }
-                AppResult::WorkflowDetailError(error) => {
-                    self.workflow_detail_state.error = Some(error.clone());
+                AppResult::WorkflowDetailError(request_id, error) => {
+                    if request_id != self.detail_request_id {
+                        continue;
+                    }
+                    if self.workflow_detail_state.workflow.is_some() {
+                        self.workflow_detail_state.outline_note = Some(error.clone());
+                    } else {
+                        self.workflow_detail_state.error = Some(error.clone());
+                    }
                     self.workflow_detail_state.loading = false;
+                    self.workflow_detail_state.refreshing = false;
+                    self.workflow_detail_state.last_refresh = Some(std::time::Instant::now());
                     tracing::error!("{}", error);
                 }
                 AppResult::NamespacesLoaded { namespaces } => {
@@ -683,7 +943,10 @@ impl App {
                         self.namespace_list_state.table_state.select(Some(0));
                     }
 
-                    tracing::info!("Loaded {} namespaces", self.namespace_list_state.items.len());
+                    tracing::info!(
+                        "Loaded {} namespaces",
+                        self.namespace_list_state.items.len()
+                    );
                 }
                 AppResult::NamespacesError(error) => {
                     self.namespace_list_state.error = Some(error.clone());
@@ -694,9 +957,13 @@ impl App {
                     self.current_namespace = namespace.clone();
                     tracing::info!("Switched to namespace: {}", namespace);
                     // Refresh workflows after switching namespace
+                    self.workflow_list_state.prev_page_tokens.clear();
+                    self.workflow_list_state.current_page_token.clear();
+                    self.workflow_list_state.current_page = 1;
+                    self.workflow_list_state.items.clear();
                     self.workflow_list_state.loading = true;
                     let query = self.workflow_list_state.get_query();
-                    let _ = self.command_tx.send(AppCommand::RefreshWorkflows(query));
+                    let _ = self.load_workflows(query, Vec::new());
                     // Switch back to workflows screen
                     self.current_screen = Screen::Workflows;
                 }
@@ -725,11 +992,33 @@ impl App {
             self.process_results();
 
             // Check if auto-refresh is needed (only on Workflows screen)
-            if matches!(self.current_screen, Screen::Workflows) && self.workflow_list_state.should_refresh() {
+            if matches!(self.current_screen, Screen::Workflows)
+                && self.workflow_list_state.should_refresh()
+            {
                 tracing::debug!("Auto-refreshing workflows");
+                self.workflow_list_state.prev_page_tokens.clear();
+                self.workflow_list_state.current_page_token.clear();
+                self.workflow_list_state.current_page = 1;
                 self.workflow_list_state.loading = true;
                 let query = self.workflow_list_state.get_query();
-                let _ = self.command_tx.send(AppCommand::RefreshWorkflows(query));
+                let _ = self.load_workflows(query, Vec::new());
+            }
+
+            if matches!(self.current_screen, Screen::WorkflowDetail) {
+                let state = &self.workflow_detail_state;
+                if state.auto_refresh_enabled
+                    && !state.loading
+                    && state.show_dialog.is_none()
+                    && !state.show_event_detail
+                    && state.success_message.is_none()
+                    && state
+                        .last_refresh
+                        .is_some_and(|last| last.elapsed().as_secs() >= 5)
+                {
+                    if let Some(workflow) = state.workflow.clone() {
+                        self.load_detail(workflow, false);
+                    }
+                }
             }
 
             terminal.draw(|f| ui::render(&self, f))?;
@@ -766,15 +1055,18 @@ impl App {
                         KeyCode::Enter => {
                             // Save to history if non-empty
                             if !self.workflow_list_state.query.is_empty() {
-                                self.workflow_list_state.query_history.push(self.workflow_list_state.query.clone());
+                                self.workflow_list_state
+                                    .query_history
+                                    .push(self.workflow_list_state.query.clone());
                             }
                             // Exit input mode and refresh (reset to page 1)
                             self.workflow_list_state.input_mode = false;
                             self.workflow_list_state.loading = true;
                             self.workflow_list_state.prev_page_tokens.clear();
+                            self.workflow_list_state.current_page_token.clear();
                             self.workflow_list_state.current_page = 1;
                             let query = self.workflow_list_state.get_query();
-                            let _ = self.command_tx.send(AppCommand::RefreshWorkflows(query));
+                            let _ = self.load_workflows(query, Vec::new());
                         }
                         KeyCode::Esc => {
                             // Exit input mode without searching
@@ -796,7 +1088,9 @@ impl App {
                     KeyCode::Char('2') => {
                         self.current_screen = Screen::Namespaces;
                         // Load namespaces if empty
-                        if self.namespace_list_state.items.is_empty() && !self.namespace_list_state.loading {
+                        if self.namespace_list_state.items.is_empty()
+                            && !self.namespace_list_state.loading
+                        {
                             self.namespace_list_state.loading = true;
                             let _ = self.command_tx.send(AppCommand::RefreshNamespaces);
                         }
@@ -812,20 +1106,22 @@ impl App {
                     }
                     KeyCode::Char('f') => {
                         // Cycle through filters
-                        self.workflow_list_state.active_filter = match self.workflow_list_state.active_filter {
-                            None => Some(WorkflowFilter::Running),
-                            Some(WorkflowFilter::Running) => Some(WorkflowFilter::Completed),
-                            Some(WorkflowFilter::Completed) => Some(WorkflowFilter::Failed),
-                            Some(WorkflowFilter::Failed) => Some(WorkflowFilter::Canceled),
-                            Some(WorkflowFilter::Canceled) => Some(WorkflowFilter::All),
-                            Some(WorkflowFilter::All) => None,
-                        };
+                        self.workflow_list_state.active_filter =
+                            match self.workflow_list_state.active_filter {
+                                None => Some(WorkflowFilter::Running),
+                                Some(WorkflowFilter::Running) => Some(WorkflowFilter::Completed),
+                                Some(WorkflowFilter::Completed) => Some(WorkflowFilter::Failed),
+                                Some(WorkflowFilter::Failed) => Some(WorkflowFilter::Canceled),
+                                Some(WorkflowFilter::Canceled) => Some(WorkflowFilter::All),
+                                Some(WorkflowFilter::All) => None,
+                            };
                         // Refresh with new filter (reset to page 1)
                         self.workflow_list_state.loading = true;
                         self.workflow_list_state.prev_page_tokens.clear();
+                        self.workflow_list_state.current_page_token.clear();
                         self.workflow_list_state.current_page = 1;
                         let query = self.workflow_list_state.get_query();
-                        let _ = self.command_tx.send(AppCommand::RefreshWorkflows(query));
+                        let _ = self.load_workflows(query, Vec::new());
                     }
                     KeyCode::Char('c') => {
                         // Clear filter and search (reset to page 1)
@@ -833,14 +1129,34 @@ impl App {
                         self.workflow_list_state.query.clear();
                         self.workflow_list_state.loading = true;
                         self.workflow_list_state.prev_page_tokens.clear();
+                        self.workflow_list_state.current_page_token.clear();
                         self.workflow_list_state.current_page = 1;
-                        let _ = self.command_tx.send(AppCommand::RefreshWorkflows(String::new()));
+                        let query = self.workflow_list_state.get_query();
+                        let _ = self.load_workflows(query, Vec::new());
+                    }
+                    KeyCode::Char('v') => {
+                        // Visibility scope is part of the server query so pages remain full.
+                        self.workflow_list_state.show_child_workflows =
+                            !self.workflow_list_state.show_child_workflows;
+                        self.workflow_list_state.loading = true;
+                        self.workflow_list_state.prev_page_tokens.clear();
+                        self.workflow_list_state.current_page_token.clear();
+                        self.workflow_list_state.current_page = 1;
+                        self.workflow_list_state.next_page_token.clear();
+                        self.workflow_list_state.items.clear();
+                        self.workflow_list_state.table_state.select(None);
+                        let query = self.workflow_list_state.get_query();
+                        let _ = self.load_workflows(query, Vec::new());
                     }
                     KeyCode::Char('a') => {
                         // Toggle auto-refresh
-                        self.workflow_list_state.auto_refresh_enabled = !self.workflow_list_state.auto_refresh_enabled;
+                        self.workflow_list_state.auto_refresh_enabled =
+                            !self.workflow_list_state.auto_refresh_enabled;
                         if self.workflow_list_state.auto_refresh_enabled {
-                            tracing::info!("Auto-refresh enabled ({}s interval)", self.workflow_list_state.auto_refresh_interval_secs);
+                            tracing::info!(
+                                "Auto-refresh enabled ({}s interval)",
+                                self.workflow_list_state.auto_refresh_interval_secs
+                            );
                         } else {
                             tracing::info!("Auto-refresh disabled");
                         }
@@ -855,42 +1171,21 @@ impl App {
                         // Refresh workflows with current query (reset to page 1)
                         self.workflow_list_state.loading = true;
                         self.workflow_list_state.prev_page_tokens.clear();
+                        self.workflow_list_state.current_page_token.clear();
                         self.workflow_list_state.current_page = 1;
                         let query = self.workflow_list_state.get_query();
-                        let _ = self.command_tx.send(AppCommand::RefreshWorkflows(query));
+                        let _ = self.load_workflows(query, Vec::new());
                     }
                     KeyCode::Char('n') | KeyCode::Right => {
-                        // Next page
-                        if self.workflow_list_state.has_next_page() && !self.workflow_list_state.loading {
-                            tracing::info!("Loading next page");
-                            self.workflow_list_state.loading = true;
-
-                            // Save current page token for going back
-                            if !self.workflow_list_state.next_page_token.is_empty() {
-                                // We're about to go forward, so save where we are
-                                // This is a bit tricky: we need to track the token that got us TO this page
-                                // For simplicity, we'll rebuild previous pages by using the page number
-                                self.workflow_list_state.prev_page_tokens.push(Vec::new()); // Placeholder
-                                self.workflow_list_state.current_page += 1;
-                            }
-
+                        if let Some(token) = self.workflow_list_state.begin_next_page() {
                             let query = self.workflow_list_state.get_query();
-                            let page_token = self.workflow_list_state.next_page_token.clone();
-                            let _ = self.command_tx.send(AppCommand::LoadNextPage(query, page_token));
+                            let _ = self.load_workflows(query, token);
                         }
                     }
                     KeyCode::Char('p') | KeyCode::Left => {
-                        // Previous page
-                        if self.workflow_list_state.has_prev_page() && !self.workflow_list_state.loading {
-                            tracing::info!("Loading previous page");
-                            self.workflow_list_state.loading = true;
-
-                            // Pop the last page token
-                            self.workflow_list_state.prev_page_tokens.pop();
-                            self.workflow_list_state.current_page = self.workflow_list_state.current_page.saturating_sub(1).max(1);
-
+                        if let Some(token) = self.workflow_list_state.begin_previous_page() {
                             let query = self.workflow_list_state.get_query();
-                            let _ = self.command_tx.send(AppCommand::LoadPreviousPage(query));
+                            let _ = self.load_workflows(query, token);
                         }
                     }
                     KeyCode::Enter => {
@@ -898,11 +1193,9 @@ impl App {
                         if let Some(workflow) = self.workflow_list_state.selected_workflow() {
                             if let Some(execution) = &workflow.execution {
                                 tracing::info!("Viewing workflow: {}", execution.workflow_id);
-                                self.workflow_detail_state.loading = true;
-                                let _ = self.command_tx.send(AppCommand::ViewWorkflowDetail(
-                                    execution.workflow_id.clone(),
-                                    execution.run_id.clone(),
-                                ));
+                                let workflow = workflow.clone();
+                                self.detail_back_stack.clear();
+                                self.load_detail(workflow, true);
                                 self.current_screen = Screen::WorkflowDetail;
                             }
                         }
@@ -937,13 +1230,25 @@ impl App {
                         if let Some(ns_info) = &ns_response.namespace_info {
                             let namespace_name = ns_info.name.clone();
                             tracing::info!("Switching to namespace: {}", namespace_name);
-                            let _ = self.command_tx.send(AppCommand::SwitchNamespace(namespace_name));
+                            let _ = self
+                                .command_tx
+                                .send(AppCommand::SwitchNamespace(namespace_name));
                         }
                     }
                 }
                 _ => {}
             },
             Screen::WorkflowDetail => {
+                if self.workflow_detail_state.loading {
+                    if matches!(key, KeyCode::Esc | KeyCode::Char('q')) {
+                        if let Some(parent) = self.detail_back_stack.pop() {
+                            self.load_detail(parent, true);
+                        } else {
+                            self.current_screen = Screen::Workflows;
+                        }
+                    }
+                    return Ok(());
+                }
                 // Handle event detail modal scrolling and dismissal
                 if self.workflow_detail_state.show_event_detail {
                     match key {
@@ -952,20 +1257,28 @@ impl App {
                             self.workflow_detail_state.event_detail_scroll_offset = 0;
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            self.workflow_detail_state.event_detail_scroll_offset =
-                                self.workflow_detail_state.event_detail_scroll_offset.saturating_add(1);
+                            self.workflow_detail_state.event_detail_scroll_offset = self
+                                .workflow_detail_state
+                                .event_detail_scroll_offset
+                                .saturating_add(1);
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            self.workflow_detail_state.event_detail_scroll_offset =
-                                self.workflow_detail_state.event_detail_scroll_offset.saturating_sub(1);
+                            self.workflow_detail_state.event_detail_scroll_offset = self
+                                .workflow_detail_state
+                                .event_detail_scroll_offset
+                                .saturating_sub(1);
                         }
                         KeyCode::PageDown => {
-                            self.workflow_detail_state.event_detail_scroll_offset =
-                                self.workflow_detail_state.event_detail_scroll_offset.saturating_add(10);
+                            self.workflow_detail_state.event_detail_scroll_offset = self
+                                .workflow_detail_state
+                                .event_detail_scroll_offset
+                                .saturating_add(10);
                         }
                         KeyCode::PageUp => {
-                            self.workflow_detail_state.event_detail_scroll_offset =
-                                self.workflow_detail_state.event_detail_scroll_offset.saturating_sub(10);
+                            self.workflow_detail_state.event_detail_scroll_offset = self
+                                .workflow_detail_state
+                                .event_detail_scroll_offset
+                                .saturating_sub(10);
                         }
                         _ => {}
                     }
@@ -989,7 +1302,7 @@ impl App {
                         }
                         KeyCode::Enter => {
                             // Execute the operation
-                            if let Some(workflow) = &self.workflow_detail_state.workflow {
+                            if let Some(workflow) = &self.workflow_detail_state.dialog_workflow {
                                 if let Some(execution) = &workflow.execution {
                                     let workflow_id = execution.workflow_id.clone();
                                     let run_id = execution.run_id.clone();
@@ -997,17 +1310,36 @@ impl App {
 
                                     match operation {
                                         WorkflowOperation::Terminate => {
-                                            let reason = if input.is_empty() { "Terminated by user".to_string() } else { input };
-                                            let _ = self.command_tx.send(AppCommand::TerminateWorkflow(workflow_id, run_id, reason));
+                                            let reason = if input.is_empty() {
+                                                "Terminated by user".to_string()
+                                            } else {
+                                                input
+                                            };
+                                            let _ = self.command_tx.send(
+                                                AppCommand::TerminateWorkflow(
+                                                    workflow_id,
+                                                    run_id,
+                                                    reason,
+                                                ),
+                                            );
                                         }
                                         WorkflowOperation::Cancel => {
-                                            let _ = self.command_tx.send(AppCommand::CancelWorkflow(workflow_id, run_id));
+                                            let _ = self.command_tx.send(
+                                                AppCommand::CancelWorkflow(workflow_id, run_id),
+                                            );
                                         }
                                         WorkflowOperation::Signal => {
                                             if !input.is_empty() {
-                                                let _ = self.command_tx.send(AppCommand::SignalWorkflow(workflow_id, run_id, input));
+                                                let _ = self.command_tx.send(
+                                                    AppCommand::SignalWorkflow(
+                                                        workflow_id,
+                                                        run_id,
+                                                        input,
+                                                    ),
+                                                );
                                             } else {
-                                                self.workflow_detail_state.error = Some("Signal name cannot be empty".to_string());
+                                                self.workflow_detail_state.error =
+                                                    Some("Signal name cannot be empty".to_string());
                                                 self.workflow_detail_state.show_dialog = None;
                                                 self.workflow_detail_state.dialog_input.clear();
                                             }
@@ -1017,11 +1349,13 @@ impl App {
                             }
                             // Close dialog after sending command
                             self.workflow_detail_state.show_dialog = None;
+                            self.workflow_detail_state.dialog_workflow = None;
                             self.workflow_detail_state.dialog_input.clear();
                         }
                         KeyCode::Esc => {
                             // Cancel dialog
                             self.workflow_detail_state.show_dialog = None;
+                            self.workflow_detail_state.dialog_workflow = None;
                             self.workflow_detail_state.dialog_input.clear();
                         }
                         _ => {}
@@ -1032,21 +1366,39 @@ impl App {
                 // Normal mode key handling
                 match key {
                     KeyCode::Char('q') | KeyCode::Esc => {
-                        self.current_screen = Screen::Workflows;
+                        if let Some(parent) = self.detail_back_stack.pop() {
+                            self.load_detail(parent, true);
+                        } else {
+                            self.current_screen = Screen::Workflows;
+                        }
                     }
                     KeyCode::Char('1') => {
+                        self.detail_back_stack.clear();
                         self.current_screen = Screen::Workflows;
                     }
                     KeyCode::Char('2') => {
                         self.current_screen = Screen::Namespaces;
                         // Load namespaces if empty
-                        if self.namespace_list_state.items.is_empty() && !self.namespace_list_state.loading {
+                        if self.namespace_list_state.items.is_empty()
+                            && !self.namespace_list_state.loading
+                        {
                             self.namespace_list_state.loading = true;
                             let _ = self.command_tx.send(AppCommand::RefreshNamespaces);
                         }
                     }
                     KeyCode::Char('t') => {
                         // Show terminate dialog
+                        let target = if self.workflow_detail_state.show_history {
+                            self.workflow_detail_state.workflow.clone()
+                        } else {
+                            self.workflow_detail_state
+                                .selected_outline_workflow()
+                                .cloned()
+                        };
+                        if target.is_none() {
+                            return Ok(());
+                        }
+                        self.workflow_detail_state.dialog_workflow = target;
                         self.workflow_detail_state.show_dialog = Some(WorkflowOperation::Terminate);
                         self.workflow_detail_state.dialog_input.clear();
                         self.workflow_detail_state.success_message = None;
@@ -1054,6 +1406,17 @@ impl App {
                     }
                     KeyCode::Char('x') => {
                         // Show cancel dialog
+                        let target = if self.workflow_detail_state.show_history {
+                            self.workflow_detail_state.workflow.clone()
+                        } else {
+                            self.workflow_detail_state
+                                .selected_outline_workflow()
+                                .cloned()
+                        };
+                        if target.is_none() {
+                            return Ok(());
+                        }
+                        self.workflow_detail_state.dialog_workflow = target;
                         self.workflow_detail_state.show_dialog = Some(WorkflowOperation::Cancel);
                         self.workflow_detail_state.dialog_input.clear();
                         self.workflow_detail_state.success_message = None;
@@ -1061,6 +1424,17 @@ impl App {
                     }
                     KeyCode::Char('s') => {
                         // Show signal dialog
+                        let target = if self.workflow_detail_state.show_history {
+                            self.workflow_detail_state.workflow.clone()
+                        } else {
+                            self.workflow_detail_state
+                                .selected_outline_workflow()
+                                .cloned()
+                        };
+                        if target.is_none() {
+                            return Ok(());
+                        }
+                        self.workflow_detail_state.dialog_workflow = target;
                         self.workflow_detail_state.show_dialog = Some(WorkflowOperation::Signal);
                         self.workflow_detail_state.dialog_input.clear();
                         self.workflow_detail_state.success_message = None;
@@ -1072,11 +1446,44 @@ impl App {
                     KeyCode::Up | KeyCode::Char('k') => {
                         self.workflow_detail_state.select_previous();
                     }
+                    KeyCode::Tab => {
+                        self.workflow_detail_state.show_history =
+                            !self.workflow_detail_state.show_history;
+                    }
+                    KeyCode::Char('r') => {
+                        if !self.workflow_detail_state.refreshing {
+                            if let Some(workflow) = self.workflow_detail_state.workflow.clone() {
+                                self.load_detail(workflow, false);
+                            }
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        self.workflow_detail_state.auto_refresh_enabled =
+                            !self.workflow_detail_state.auto_refresh_enabled;
+                    }
                     KeyCode::Enter => {
-                        // Show event detail modal
-                        if self.workflow_detail_state.selected_event().is_some() {
-                            self.workflow_detail_state.event_detail_scroll_offset = 0;
-                            self.workflow_detail_state.show_event_detail = true;
+                        if self.workflow_detail_state.show_history {
+                            if self.workflow_detail_state.selected_event().is_some() {
+                                self.workflow_detail_state.event_detail_scroll_offset = 0;
+                                self.workflow_detail_state.show_event_detail = true;
+                            }
+                        } else if let Some(child) = self
+                            .workflow_detail_state
+                            .selected_outline_workflow()
+                            .cloned()
+                        {
+                            if child.execution
+                                != self
+                                    .workflow_detail_state
+                                    .workflow
+                                    .as_ref()
+                                    .and_then(|w| w.execution.clone())
+                            {
+                                if let Some(parent) = self.workflow_detail_state.workflow.clone() {
+                                    self.detail_back_stack.push(parent);
+                                    self.load_detail(child, true);
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -1106,3 +1513,60 @@ impl App {
 }
 
 // Note: App is no longer Clone since it owns channels and moves into run()
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_query_combines_search_and_status() {
+        let mut state = WorkflowListState::new();
+        state.query = "WorkflowType = 'Example'".into();
+        state.active_filter = Some(WorkflowFilter::Running);
+        assert_eq!(
+            state.get_query(),
+            "ParentWorkflowId IS NULL AND ExecutionStatus = 'Running' AND (WorkflowType = 'Example')"
+        );
+    }
+
+    #[test]
+    fn parent_scope_defaults_on_and_can_show_all() {
+        let mut state = WorkflowListState::new();
+        assert_eq!(state.get_query(), "ParentWorkflowId IS NULL");
+        state.show_child_workflows = true;
+        assert_eq!(state.get_query(), "");
+        state.active_filter = Some(WorkflowFilter::Failed);
+        assert_eq!(state.get_query(), "ExecutionStatus = 'Failed'");
+    }
+
+    #[test]
+    fn parent_scope_applies_to_entire_or_search() {
+        let mut state = WorkflowListState::new();
+        state.query = "WorkflowId = 'parent' OR WorkflowId = 'child'".into();
+        assert_eq!(
+            state.get_query(),
+            "ParentWorkflowId IS NULL AND (WorkflowId = 'parent' OR WorkflowId = 'child')"
+        );
+    }
+
+    #[test]
+    fn pagination_tokens_track_current_page() {
+        let mut state = WorkflowListState::new();
+        assert_eq!(state.begin_previous_page(), None);
+        state.next_page_token = vec![1];
+        assert_eq!(state.begin_next_page(), Some(vec![1]));
+        assert_eq!(state.current_page, 2);
+        assert_eq!(state.begin_next_page(), None); // cannot page while loading
+        state.loading = false;
+        state.next_page_token = vec![2];
+        assert_eq!(state.begin_next_page(), Some(vec![2]));
+        assert_eq!(state.current_page, 3);
+        state.loading = false;
+        assert_eq!(state.begin_previous_page(), Some(vec![1]));
+        assert_eq!(state.current_page, 2);
+        state.loading = false;
+        assert_eq!(state.begin_previous_page(), Some(Vec::new()));
+        assert_eq!(state.current_page, 1);
+        assert_eq!(state.begin_previous_page(), None);
+    }
+}

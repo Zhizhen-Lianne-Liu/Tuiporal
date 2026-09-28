@@ -2,6 +2,7 @@
 // This will be expanded in Phase 2
 
 pub mod client;
+pub mod tree;
 
 // Unused for now, will be used in Phase 2
 #[allow(unused_imports)]

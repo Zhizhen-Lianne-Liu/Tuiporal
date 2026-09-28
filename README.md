@@ -4,7 +4,8 @@ A Terminal User Interface (TUI) for [Temporal](https://temporal.io) workflow orc
 
 ## Features
 
-- **Workflow Management**: List, search, filter, and view workflows with real-time updates
+- **Workflow Management**: Parent-only list by default, with search, filters, pagination, and live updates
+- **Execution Tree**: Folder-style child-workflow branches and activities, with animated running indicators and live running/queued/completed states
 - **Workflow Operations**: Terminate, cancel, and signal workflows
 - **Namespace Management**: Browse and switch between namespaces
 - **Authentication**: Temporal Cloud (API key + TLS) and mTLS support
@@ -19,9 +20,8 @@ A Terminal User Interface (TUI) for [Temporal](https://temporal.io) workflow orc
 docker run -d -p 7233:7233 temporalio/auto-setup:latest
 
 # Clone and build
-git clone https://github.com/yourusername/tuiporal.git
+git clone --recurse-submodules https://github.com/Zhizhen-Lianne-Liu/Tuiporal.git
 cd tuiporal
-git clone --depth 1 https://github.com/temporalio/api.git proto/temporal-api
 cargo run
 ```
 
@@ -88,18 +88,23 @@ profiles:
 ## Keybindings
 
 ### Global
-- `1` - Workflows, `2` - Namespaces, `h/?` - Help, `q` - Quit
+- `1` - Workflows, `2` - Namespaces, `?` - Help, `q` - Quit/back
 
 ### Workflows Screen
 - `↑/↓` or `j/k` - Navigate, `Enter` - View details
-- `/` - Search, `f` - Filter by status, `c` - Clear filters
+- `/` - Search, `f` - Filter by status, `c` - Clear search/status filter
+- `v` - Toggle parent-only (default) / all workflows, including children
 - `r` - Refresh, `a` - Toggle auto-refresh
 - `n/p` - Next/Previous page
 
 ### Workflow Detail
-- `Tab` - Switch tabs, `↑/↓` or `j/k` - Scroll
-- `t` - Terminate, `x` - Cancel, `s` - Signal
-- `ESC` - Back
+- A compact execution header and folder-style tree open by default; statuses refresh every 5 seconds. Running and queued work is highlighted.
+- `↑/↓` or `j/k` - Navigate the tree; `Enter` - Open selected child workflow; `ESC` - Return to parent/list
+- `Tab` - Switch between tree and raw event history; `Enter` in history - View event details
+- `r` - Refresh now, `a` - Toggle auto-refresh
+- `t` - Terminate, `x` - Cancel, `s` - Signal the selected workflow (confirmation shows its ID)
+
+Child relationships use Temporal execution history and `RootWorkflowId` visibility; live activity states come from `DescribeWorkflowExecution`. Child histories outside the current namespace may appear as placeholders.
 
 ### Namespaces
 - `↑/↓` or `j/k` - Navigate, `Enter` - Switch namespace
@@ -107,7 +112,7 @@ profiles:
 
 ## Prerequisites
 
-- Rust 1.70+
+- A recent stable Rust toolchain (tested with 1.97)
 - Protocol Buffers compiler (`protoc`)
   - macOS: `brew install protobuf`
   - Linux: `sudo apt-get install protobuf-compiler`
@@ -115,17 +120,18 @@ profiles:
 ## Building
 
 ```bash
-git clone https://github.com/yourusername/tuiporal.git
+git clone --recurse-submodules https://github.com/Zhizhen-Lianne-Liu/Tuiporal.git
 cd tuiporal
-git clone --depth 1 https://github.com/temporalio/api.git proto/temporal-api
 cargo build --release
 ```
+
+The Temporal API is pinned as a Git submodule. For an existing clone, run `git submodule update --init`. The build script generates Rust bindings into Cargo’s build directory; no generated source files need to be committed.
 
 ## Development
 
 ```bash
 # Run with logging
-RUST_LOG=debug cargo run
+TUIPORAL_LOG=/tmp/tuiporal.log RUST_LOG=debug cargo run
 
 # Format and lint
 cargo fmt

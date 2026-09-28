@@ -642,14 +642,29 @@ fn render_event_detail_modal(app: &App, frame: &mut Frame, area: Rect) {
     )));
     lines.push(Line::from(""));
 
-    // Format event attributes based on type
-    lines.extend(format_event_attributes(event));
+    // Attributes were decoded once when the event was opened, not on every animation frame.
+    for line in &state.event_detail_lines {
+        if let Some((key, value)) = line.split_once("\": ") {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{}\":", key), Style::default().fg(Color::Cyan)),
+                Span::raw(format!(" {}", value)),
+            ]));
+        } else {
+            lines.push(Line::from(line.clone()));
+        }
+    }
 
-    let total_lines = lines.len() as u16;
     let scroll_offset = state.event_detail_scroll_offset;
+    let visible_lines = modal_area.height.saturating_sub(2);
+    // Count wrapped display rows rather than JSON source lines so long values remain scrollable.
+    let content_width = modal_area.width.saturating_sub(2).max(1) as usize;
+    let total_lines = lines
+        .iter()
+        .map(|line| (line.width().max(1) - 1) / content_width + 1)
+        .sum::<usize>()
+        .min(u16::MAX as usize) as u16;
 
     // Calculate if we can scroll more
-    let visible_lines = modal_area.height.saturating_sub(2); // Subtract borders
     let max_scroll = total_lines.saturating_sub(visible_lines);
     let can_scroll_down = scroll_offset < max_scroll;
     let can_scroll_up = scroll_offset > 0;
@@ -683,43 +698,6 @@ fn render_event_detail_modal(app: &App, frame: &mut Frame, area: Rect) {
         .wrap(ratatui::widgets::Wrap { trim: false });
 
     frame.render_widget(paragraph, modal_area);
-}
-
-fn format_event_attributes(
-    event: &crate::generated::temporal::api::history::v1::HistoryEvent,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![];
-
-    // Use prost's reflection capabilities to format the event
-    // For now, we'll show a simplified version with the most common attributes
-
-    if let Some(attrs) = &event.attributes {
-        // This is a oneof field - we need to handle each variant
-        // For simplicity, we'll use debug formatting
-        let debug_str = format!("{:?}", attrs);
-
-        // Split into lines and format nicely
-        for (i, line) in debug_str.lines().enumerate() {
-            if i < 50 {
-                // Limit to 50 lines to avoid overwhelming the display
-                lines.push(Line::from(Span::raw(line.to_string())));
-            }
-        }
-
-        if debug_str.lines().count() > 50 {
-            lines.push(Line::from(Span::styled(
-                "... (output truncated)",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    } else {
-        lines.push(Line::from(Span::styled(
-            "No attributes available",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    lines
 }
 
 #[cfg(test)]

@@ -100,7 +100,7 @@ profiles:
 ### Workflow Detail
 - A compact execution header and folder-style tree open by default; statuses refresh every 5 seconds. Running and queued work is highlighted.
 - `↑/↓` or `j/k` - Navigate the tree; `Enter` - Open selected child workflow; `ESC` - Return to parent/list
-- `Tab` - Switch between tree and raw event history; `Enter` in history - View event details
+- `Tab` - Switch between tree and event history; `Enter` in history - View structured JSON event attributes (including JSON inputs/results)
 - `r` - Refresh now, `a` - Toggle auto-refresh
 - `t` - Terminate, `x` - Cancel, `s` - Signal the selected workflow (confirmation shows its ID)
 

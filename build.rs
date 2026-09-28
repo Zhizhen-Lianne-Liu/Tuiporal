@@ -13,6 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(false) // We only need client code
         .build_client(true)
         .include_file("temporal.rs") // Generate the nested package module tree in OUT_DIR
+        .file_descriptor_set_path(
+            std::env::var("OUT_DIR")?.to_string() + "/temporal_descriptor.bin",
+        )
         .compile_protos(
             &[proto_file],
             &[proto_root], // Include path for imports

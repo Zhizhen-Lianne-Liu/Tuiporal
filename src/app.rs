@@ -5,6 +5,7 @@ use crate::generated::temporal::api::{
     workflowservice::v1::DescribeNamespaceResponse,
 };
 use crate::temporal::{
+    event_format::structured_attributes,
     tree::{build_outline, OutlineRow, WorkflowSnapshot},
     TemporalClient,
 };
@@ -252,6 +253,7 @@ pub struct WorkflowDetailState {
     pub dialog_input: String,
     pub success_message: Option<String>,
     pub show_event_detail: bool,
+    pub event_detail_lines: Vec<String>,
     pub event_detail_scroll_offset: u16,
 }
 
@@ -282,6 +284,7 @@ impl WorkflowDetailState {
             dialog_input: String::new(),
             success_message: None,
             show_event_detail: false,
+            event_detail_lines: Vec::new(),
             event_detail_scroll_offset: 0,
         }
     }
@@ -1254,6 +1257,7 @@ impl App {
                     match key {
                         KeyCode::Esc | KeyCode::Char('q') => {
                             self.workflow_detail_state.show_event_detail = false;
+                            self.workflow_detail_state.event_detail_lines.clear();
                             self.workflow_detail_state.event_detail_scroll_offset = 0;
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
@@ -1463,7 +1467,11 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if self.workflow_detail_state.show_history {
-                            if self.workflow_detail_state.selected_event().is_some() {
+                            if let Some(event) = self.workflow_detail_state.selected_event() {
+                                let lines = structured_attributes(event).unwrap_or_else(|error| {
+                                    vec![format!("Could not decode event attributes: {error}")]
+                                });
+                                self.workflow_detail_state.event_detail_lines = lines;
                                 self.workflow_detail_state.event_detail_scroll_offset = 0;
                                 self.workflow_detail_state.show_event_detail = true;
                             }

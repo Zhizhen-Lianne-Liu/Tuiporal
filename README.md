@@ -13,52 +13,56 @@ A Terminal User Interface (TUI) for [Temporal](https://temporal.io) workflow orc
 
 ## Quick Start
 
-### Local Development
+Install [Rust and `protoc`](#prerequisites), then install the command **once**:
 
 ```bash
-# Start Temporal server
-docker run -d -p 7233:7233 temporalio/auto-setup:latest
-
-# Clone and build
 git clone --recurse-submodules https://github.com/Zhizhen-Lianne-Liu/Tuiporal.git
-cd tuiporal
-cargo run
+cd Tuiporal
+cargo install --path . --locked
+command -v tuiporal
+```
+
+`cargo install` places `tuiporal` in `~/.cargo/bin`, making it available from
+**any directory for this user** when that directory is on `PATH`. If
+`command -v tuiporal` finds nothing, add `~/.cargo/bin` to your shell/agent's
+`PATH` (for the current shell: `export PATH="$HOME/.cargo/bin:$PATH"`), or run
+`~/.cargo/bin/tuiporal` directly. Agents in containers or on other machines
+need their own installation; this does not install on those machines.
+
+To try it with a local Temporal server:
+
+```bash
+docker run -d -p 7233:7233 temporalio/auto-setup:latest
+tuiporal
 ```
 
 ### Open a workflow directly (for agents and testing)
 
-Build once in the cloned repository:
+From **any directory**, you can open a known workflow without searching:
 
 ```bash
-cargo build
-```
-
-If you know a workflow ID, open its execution without searching the list:
-
-```bash
-./target/debug/tuiporal show --workflow-id my-workflow-id
+tuiporal show --workflow-id my-workflow-id
 ```
 
 In **iTerm2 on macOS**, add `--split` to open it beside the terminal session
 that ran the command. Your agent can run the same command using its shell tool:
 
 ```bash
-./target/debug/tuiporal show --workflow-id my-workflow-id --split
+tuiporal show --workflow-id my-workflow-id --split
 ```
 
 If you also know the run ID (a workflow ID can have multiple runs), pass it with
 `--run-id my-run-id`. Without it, Tuiporal opens the latest run. The CLI and
 Tuiporal must connect to the **same Temporal server and namespace**; they read
-`~/.tuiporal/config.yaml` as described below. `--split` needs an iTerm2 session
-and creates a new pane each time. Close a workflow with `Esc` (back to list),
-then `q` (exit). Outside iTerm2, omit `--split` and run the command in the
-terminal where you want the UI.
+`~/.tuiporal/config.yaml` as described below. `--split` needs a local iTerm2
+session and creates a new pane each time. Close a workflow with `Esc` (back to
+list), then `q` (exit). Outside iTerm2, omit `--split` and run the command in
+the terminal where you want the UI.
 
 **Agent instruction you can paste:** “After starting a Temporal workflow, use
 its returned workflow ID and run ID to run `tuiporal show --workflow-id ID
---run-id RUN_ID --split`, so I can watch it in iTerm2.” If you have not
-installed Tuiporal into your PATH, use `./target/debug/tuiporal` instead of
-`tuiporal` and run the command from this repository.
+--run-id RUN_ID --split`, so I can watch it in iTerm2.” Agents with a different
+`PATH` can run `$HOME/.cargo/bin/tuiporal` instead.
 
 ### Temporal Cloud
 
@@ -154,15 +158,18 @@ Child relationships use Temporal execution history and `RootWorkflowId` visibili
   - macOS: `brew install protobuf`
   - Linux: `sudo apt-get install protobuf-compiler`
 
-## Building
+## Building without installing
 
-```bash
-git clone --recurse-submodules https://github.com/Zhizhen-Lianne-Liu/Tuiporal.git
-cd tuiporal
-cargo build --release
-```
+For development, `cargo build --release` creates a binary in
+`target/release/tuiporal`; it does **not** add a global command. For a globally
+available command, follow [Quick Start](#quick-start) and use `cargo install`.
 
-The Temporal API is pinned as a Git submodule. For an existing clone, run `git submodule update --init`. The build script generates Rust bindings into Cargo’s build directory; no generated source files need to be committed.
+The Temporal API is pinned as a Git submodule. For an existing clone, run
+`git submodule update --init`. The build script generates Rust bindings into
+Cargo’s build directory; no generated source files need to be committed.
+
+To update an existing installation after pulling new code, run
+`cargo install --path . --locked --force` from the cloned repository.
 
 ## Development
 

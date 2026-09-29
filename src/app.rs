@@ -6,13 +6,17 @@ use crate::generated::temporal::api::{
 };
 use crate::temporal::{
     event_format::structured_attributes,
-    tree::{build_outline, filter_outline, OutlineFilter, OutlineRow, WorkflowSnapshot},
+    tree::{
+        build_outline, execution_key_from_row, filter_outline, visible_outline, OutlineFilter,
+        OutlineRow, WorkflowSnapshot,
+    },
     TemporalClient,
 };
 use crate::ui;
 use anyhow::Result;
 use crossterm::event::KeyCode;
 use ratatui::{backend::Backend, widgets::TableState, Terminal};
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -240,6 +244,8 @@ pub struct WorkflowDetailState {
     pub history: Vec<HistoryEvent>,
     pub outline: Vec<OutlineRow>,
     pub outline_all: Vec<OutlineRow>,
+    pub outline_filtered: Vec<OutlineRow>,
+    pub expanded_nodes: HashSet<(String, String)>,
     pub outline_search: String,
     pub outline_input: String,
     pub outline_input_mode: bool,
@@ -276,6 +282,8 @@ impl WorkflowDetailState {
             history: Vec::new(),
             outline: Vec::new(),
             outline_all: Vec::new(),
+            outline_filtered: Vec::new(),
+            expanded_nodes: HashSet::new(),
             outline_search: String::new(),
             outline_input: String::new(),
             outline_input_mode: false,
@@ -339,7 +347,13 @@ impl WorkflowDetailState {
             .selected()
             .and_then(|i| self.outline.get(i))
             .map(|row| (row.workflow_id.clone(), row.label.clone(), row.is_activity));
-        self.outline = filter_outline(&self.outline_all, &self.outline_search, self.outline_filter);
+        self.outline_filtered =
+            filter_outline(&self.outline_all, &self.outline_search, self.outline_filter);
+        self.outline = if self.is_outline_filtered() {
+            self.outline_filtered.clone()
+        } else {
+            visible_outline(&self.outline_filtered, &self.expanded_nodes)
+        };
         let selection = previous.and_then(|old| {
             self.outline.iter().position(|row| {
                 (
@@ -354,6 +368,52 @@ impl WorkflowDetailState {
         } else {
             Some(selection.unwrap_or(0))
         });
+    }
+
+    pub fn is_outline_filtered(&self) -> bool {
+        !self.outline_search.is_empty() || self.outline_filter != OutlineFilter::All
+    }
+
+    pub fn row_has_children(&self, row: &OutlineRow) -> bool {
+        let Some(key) = execution_key_from_row(row) else {
+            return false;
+        };
+        self.outline_all
+            .iter()
+            .position(|candidate| execution_key_from_row(candidate).as_ref() == Some(&key))
+            .is_some_and(|index| {
+                self.outline_all
+                    .get(index + 1)
+                    .is_some_and(|next| next.depth > row.depth)
+            })
+    }
+
+    pub fn selected_folder_has_children(&self) -> bool {
+        self.outline_state
+            .selected()
+            .and_then(|i| self.outline.get(i))
+            .is_some_and(|row| self.row_has_children(row))
+    }
+
+    // `None` toggles, `Some(true)` expands, `Some(false)` collapses.
+    pub fn fold_selected_folder(&mut self, expand: Option<bool>) {
+        if self.is_outline_filtered() || !self.selected_folder_has_children() {
+            return;
+        }
+        let Some(key) = self
+            .outline_state
+            .selected()
+            .and_then(|i| self.outline.get(i))
+            .and_then(execution_key_from_row)
+        else {
+            return;
+        };
+        if expand.unwrap_or(!self.expanded_nodes.contains(&key)) {
+            self.expanded_nodes.insert(key);
+        } else {
+            self.expanded_nodes.remove(&key);
+        }
+        self.apply_outline_filter();
     }
 
     pub fn selected_outline_workflow(&self) -> Option<&WorkflowExecutionInfo> {
@@ -1574,7 +1634,21 @@ impl App {
                                 self.workflow_detail_state.event_detail_scroll_offset = 0;
                                 self.workflow_detail_state.show_event_detail = true;
                             }
-                        } else if let Some(child) = self
+                        } else {
+                            self.workflow_detail_state.fold_selected_folder(None);
+                        }
+                    }
+                    KeyCode::Char(' ') if !self.workflow_detail_state.show_history => {
+                        self.workflow_detail_state.fold_selected_folder(None);
+                    }
+                    KeyCode::Left if !self.workflow_detail_state.show_history => {
+                        self.workflow_detail_state.fold_selected_folder(Some(false));
+                    }
+                    KeyCode::Right if !self.workflow_detail_state.show_history => {
+                        self.workflow_detail_state.fold_selected_folder(Some(true));
+                    }
+                    KeyCode::Char('o') if !self.workflow_detail_state.show_history => {
+                        if let Some(child) = self
                             .workflow_detail_state
                             .selected_outline_workflow()
                             .cloned()

@@ -185,6 +185,35 @@ pub fn filter_outline(rows: &[OutlineRow], query: &str, filter: OutlineFilter) -
         .collect()
 }
 
+/// Initially only the root is visible. Opening one folder reveals its immediate
+/// children; grandchildren stay folded until their own folder is opened.
+pub fn visible_outline(
+    rows: &[OutlineRow],
+    expanded: &HashSet<(String, String)>,
+) -> Vec<OutlineRow> {
+    let mut visible = Vec::new();
+    let mut hidden_below: Option<usize> = None;
+    for (index, row) in rows.iter().enumerate() {
+        if hidden_below.is_some_and(|depth| row.depth > depth) {
+            continue;
+        }
+        hidden_below = None;
+        visible.push(row.clone());
+        if rows
+            .get(index + 1)
+            .is_some_and(|next| next.depth > row.depth)
+            && execution_key_from_row(row).is_some_and(|key| !expanded.contains(&key))
+        {
+            hidden_below = Some(row.depth);
+        }
+    }
+    visible
+}
+
+pub fn execution_key_from_row(row: &OutlineRow) -> Option<(String, String)> {
+    row.workflow.as_ref().and_then(execution_key)
+}
+
 fn execution_key(info: &WorkflowExecutionInfo) -> Option<(String, String)> {
     info.execution
         .as_ref()
@@ -505,6 +534,99 @@ mod tests {
         let rows = build_outline(&[snapshot], &root);
         assert_eq!(rows[1].label, "Shipping");
         assert_eq!(rows[1].status, NodeStatus::Running);
+    }
+
+    #[test]
+    fn folders_start_closed_and_expand_independently() {
+        let root = info("order", "Checkout", None, WorkflowExecutionStatus::Running);
+        let child = info(
+            "payment",
+            "Payment",
+            root.execution.clone(),
+            WorkflowExecutionStatus::Running,
+        );
+        let grandchild = info(
+            "fraud",
+            "Fraud",
+            child.execution.clone(),
+            WorkflowExecutionStatus::Completed,
+        );
+        let activity = |id, name: &str| HistoryEvent {
+            event_id: id,
+            attributes: Some(Attributes::ActivityTaskScheduledEventAttributes(
+                ActivityTaskScheduledEventAttributes {
+                    activity_type: Some(ActivityType { name: name.into() }),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let child_event = |id, name: &str, workflow_id: &str| HistoryEvent {
+            event_id: id,
+            attributes: Some(
+                Attributes::StartChildWorkflowExecutionInitiatedEventAttributes(
+                    StartChildWorkflowExecutionInitiatedEventAttributes {
+                        workflow_id: workflow_id.into(),
+                        workflow_type: Some(WorkflowType { name: name.into() }),
+                        ..Default::default()
+                    },
+                ),
+            ),
+            ..Default::default()
+        };
+        let rows = build_outline(
+            &[
+                WorkflowSnapshot {
+                    info: root.clone(),
+                    history: vec![
+                        activity(4, "Validate"),
+                        child_event(6, "Payment", "payment"),
+                    ],
+                    pending_activities: vec![],
+                    pending_children: vec![],
+                },
+                WorkflowSnapshot {
+                    info: child.clone(),
+                    history: vec![child_event(5, "Fraud", "fraud"), activity(8, "Charge")],
+                    pending_activities: vec![],
+                    pending_children: vec![],
+                },
+                WorkflowSnapshot {
+                    info: grandchild,
+                    history: vec![activity(2, "Risk")],
+                    pending_activities: vec![],
+                    pending_children: vec![],
+                },
+            ],
+            &root,
+        );
+        let labels = |expanded: &HashSet<(String, String)>| {
+            visible_outline(&rows, expanded)
+                .into_iter()
+                .map(|r| r.label)
+                .collect::<Vec<_>>()
+        };
+        let mut expanded = HashSet::new();
+        assert_eq!(labels(&expanded), ["Checkout"]);
+        expanded.insert(execution_key(&root).unwrap());
+        assert_eq!(labels(&expanded), ["Checkout", "Validate", "Payment"]);
+        expanded.insert(execution_key(&child).unwrap());
+        assert_eq!(
+            labels(&expanded),
+            ["Checkout", "Validate", "Payment", "Fraud", "Charge"]
+        );
+        expanded.remove(&execution_key(&root).unwrap());
+        assert_eq!(labels(&expanded), ["Checkout"]);
+        expanded.insert(execution_key(&root).unwrap());
+        assert_eq!(
+            labels(&expanded),
+            ["Checkout", "Validate", "Payment", "Fraud", "Charge"]
+        );
+        let matches = filter_outline(&rows, "risk", OutlineFilter::All);
+        assert_eq!(
+            matches.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
+            ["Checkout", "Payment", "Fraud", "Risk"]
+        );
     }
 
     #[test]

@@ -169,7 +169,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: ratatui::layout::Rect) {
             } else if app.workflow_detail_state.show_history {
                 Line::from("j/k navigate · Enter event · Tab tree · r refresh · Esc back")
             } else {
-                Line::from("j/k move · Enter child · / search · f filter · c clear · Tab events · Esc back")
+                Line::from("j/k move · Enter/Space fold · ←/→ close/open · o child · / search · Tab events · Esc back")
             }
         }
         Screen::Help => Line::from(vec![

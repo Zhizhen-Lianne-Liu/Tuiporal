@@ -2,6 +2,8 @@
 
 A Terminal User Interface (TUI) for [Temporal](https://temporal.io) workflow orchestration, written in Rust.
 
+![Tuiporal showing an order workflow, its activities, and child workflows](docs/images/workflow-detail.png)
+
 ## Features
 
 - **Workflow Management**: Parent-only list by default, with search, filters, pagination, and live updates
@@ -165,9 +167,10 @@ inside Tuiporal first if the text is not currently visible.
 - `n/p` - Next/Previous page
 
 ### Workflow Detail
-- A compact execution header and folder-style tree open by default; statuses refresh every 5 seconds. Running and queued work is highlighted.
+- A compact execution header and collapsible workflow tree; statuses refresh every 5 seconds. Running and queued work is highlighted.
 - The state column shows how long each workflow/activity ran; running timers keep ticking. Queued work has no runtime yet.
-- `↑/↓` or `j/k` - Navigate the tree; `Enter` - Open selected child workflow; `ESC` - Return to parent/list
+- `↑/↓` or `j/k` - Navigate the tree; `▸` / `▾` - Collapsed/expanded workflow; `◇` - Leaf workflow; `•` - Activity
+- `Enter` or `Space` - Toggle selected workflow folder; `←/→` - Collapse/expand; `o` - Open selected child workflow; `ESC` - Return to parent/list
 - `/` - Search names/IDs in the tree, `f` - Cycle All/Active/Failed/Done, `c` - Clear tree search/filter
 - `Tab` - Switch between tree and event history; `Enter` in history - View structured JSON event attributes (including JSON inputs/results)
 - `r` - Refresh now, `a` - Toggle auto-refresh

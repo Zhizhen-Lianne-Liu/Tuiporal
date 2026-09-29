@@ -107,7 +107,15 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  Enter", Style::default().fg(Color::Yellow)),
-            Span::raw("      → Open child / view selected event"),
+            Span::raw("      → Toggle folder / view selected event"),
+        ]),
+        Line::from(vec![
+            Span::styled("  ←/→", Style::default().fg(Color::Yellow)),
+            Span::raw("        → Collapse/expand folder (Space also toggles)"),
+        ]),
+        Line::from(vec![
+            Span::styled("  o", Style::default().fg(Color::Yellow)),
+            Span::raw("         → Open selected child workflow"),
         ]),
         Line::from(vec![
             Span::styled("  /", Style::default().fg(Color::Yellow)),

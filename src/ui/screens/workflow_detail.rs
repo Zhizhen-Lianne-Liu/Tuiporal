@@ -1,6 +1,6 @@
-use crate::app::{App, WorkflowOperation};
+use crate::app::{App, WorkflowDetailState, WorkflowOperation};
 use crate::generated::temporal::api::enums::v1::WorkflowExecutionStatus;
-use crate::temporal::tree::{NodeStatus, OutlineRow};
+use crate::temporal::tree::{execution_key_from_row, NodeStatus, OutlineRow};
 use chrono::{DateTime, Utc};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -226,6 +226,31 @@ fn tree_prefix(rows: &[OutlineRow], index: usize) -> String {
     prefix
 }
 
+// Use the complete outline to distinguish a closed folder from a true leaf.
+// Filtered results temporarily show matching descendants regardless of fold state.
+fn outline_icon(state: &WorkflowDetailState, index: usize) -> &'static str {
+    let row = &state.outline[index];
+    if row.is_activity {
+        return "•";
+    }
+    if !state.row_has_children(row) {
+        return "◇";
+    }
+    let open = if state.is_outline_filtered() {
+        state
+            .outline
+            .get(index + 1)
+            .is_some_and(|next| next.depth > row.depth)
+    } else {
+        execution_key_from_row(row).is_some_and(|key| state.expanded_nodes.contains(&key))
+    };
+    if open {
+        "▾"
+    } else {
+        "▸"
+    }
+}
+
 fn format_elapsed(milliseconds: u64) -> String {
     if milliseconds < 1_000 {
         return format!("{milliseconds}ms");
@@ -335,17 +360,7 @@ fn render_outline(app: &App, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(index, item)| {
             let prefix = tree_prefix(&state.outline, index);
-            let has_children = state
-                .outline
-                .get(index + 1)
-                .is_some_and(|next| next.depth > item.depth);
-            let icon = if item.is_activity {
-                "•"
-            } else if has_children {
-                "▾"
-            } else {
-                "◇"
-            };
+            let icon = outline_icon(state, index);
             let mut label = format!("{}{} {}", prefix, icon, item.label);
             if !item.is_activity && item.depth > 0 && area.width >= 95 {
                 label.push_str(&format!(" · {}", item.workflow_id));
@@ -760,6 +775,61 @@ fn render_event_detail_modal(app: &App, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod outline_tests {
     use super::*;
+
+    #[test]
+    fn workflow_icons_reflect_fold_state_even_when_children_are_hidden() {
+        use crate::generated::temporal::api::common::v1::WorkflowExecution;
+        use crate::generated::temporal::api::workflow::v1::WorkflowExecutionInfo;
+
+        let make_row = |id: &str, depth: usize, is_activity: bool| OutlineRow {
+            depth,
+            label: id.into(),
+            workflow_id: id.into(),
+            status: NodeStatus::Completed,
+            workflow: (!is_activity).then(|| WorkflowExecutionInfo {
+                execution: Some(WorkflowExecution {
+                    workflow_id: id.into(),
+                    run_id: "run".into(),
+                }),
+                ..Default::default()
+            }),
+            is_activity,
+            started_at: None,
+            ended_at: None,
+            reported_duration: None,
+        };
+        let mut state = WorkflowDetailState::new();
+        state.outline_all = vec![
+            make_row("root", 0, false),
+            make_row("child", 1, false),
+            make_row("task", 2, true),
+            make_row("leaf", 1, false),
+        ];
+        state.apply_outline_filter();
+        assert_eq!(state.outline.len(), 1);
+        assert_eq!(outline_icon(&state, 0), "▸");
+
+        state.fold_selected_folder(None);
+        assert_eq!(state.outline.len(), 3);
+        assert_eq!(outline_icon(&state, 0), "▾");
+        assert_eq!(outline_icon(&state, 1), "▸");
+        assert_eq!(outline_icon(&state, 2), "◇");
+        state.outline_state.select(Some(1));
+        state.fold_selected_folder(Some(true));
+        assert_eq!(state.outline.len(), 4);
+        assert_eq!(outline_icon(&state, 1), "▾");
+        assert_eq!(outline_icon(&state, 2), "•");
+        state.fold_selected_folder(Some(false));
+        assert_eq!(outline_icon(&state, 1), "▸");
+
+        state.outline_search = "task".into();
+        state.apply_outline_filter();
+        assert_eq!(state.outline.len(), 3);
+        assert_eq!(outline_icon(&state, 1), "▾");
+        state.outline_search.clear();
+        state.apply_outline_filter();
+        assert_eq!(outline_icon(&state, 1), "▸");
+    }
 
     #[test]
     fn elapsed_time_is_compact() {

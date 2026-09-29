@@ -1,11 +1,10 @@
 class Tuiporal < Formula
   desc "Terminal UI for Temporal workflows"
   homepage "https://github.com/Zhizhen-Lianne-Liu/Tuiporal"
-  url "https://github.com/Zhizhen-Lianne-Liu/Tuiporal/archive/78bd6e724f534c5cd1068746837ba9d664e75034.tar.gz"
-  version "0.1.0"
-  sha256 "3aa08a8e498dbb028427893049a8f4773a1d6e7182500938fe52e18544cff480"
+  url "https://github.com/Zhizhen-Lianne-Liu/Tuiporal/archive/refs/tags/v0.1.0.tar.gz"
+  sha256 "138c199489f7fd28ff53bec4a233aa3b49b7295753494334909fd8ca483f9cb7"
   license "Apache-2.0"
-  revision 1
+  revision 2
 
   depends_on "protobuf" => :build
   depends_on "rust" => :build

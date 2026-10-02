@@ -72,7 +72,7 @@ impl TemporalClient {
         // Configure TLS if enabled
         if let Some(tls) = tls_config {
             if tls.enabled {
-                let mut tls_config = ClientTlsConfig::new();
+                let mut tls_config = ClientTlsConfig::new().with_native_roots();
 
                 // Load client certificates if provided (mTLS)
                 if let (Some(cert_path), Some(key_path)) = (&tls.cert_path, &tls.key_path) {

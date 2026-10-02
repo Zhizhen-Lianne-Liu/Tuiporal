@@ -918,7 +918,7 @@ impl App {
                     tracing::info!("Successfully connected to Temporal");
                 }
                 Err(e) => {
-                    let error_msg = format!("Connection failed: {}", e);
+                    let error_msg = format!("Connection failed: {:#}", e);
                     self.connection_status = ConnectionStatus::Error(error_msg.clone());
                     tracing::error!("{}", error_msg);
                 }

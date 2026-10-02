@@ -16,7 +16,7 @@ clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1.42", features = ["full"] }
 
 # gRPC and protobuf
-tonic = { version = "0.12", features = ["tls"] }
+tonic = { version = "0.12", features = ["tls", "tls-native-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 prost-reflect = { version = "0.14.7", features = ["serde"] }
